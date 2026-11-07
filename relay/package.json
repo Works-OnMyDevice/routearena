@@ -1,0 +1,20 @@
+{
+  "name": "routearena-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "RouteArena relay on Cloudflare Workers: issues capped TokenRouter mirror credits and hosts published report pages. Logs metadata only, never prompts.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^4"
+  }
+}

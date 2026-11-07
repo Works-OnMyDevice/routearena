@@ -1,0 +1,312 @@
+import type { ReportAggregates, Quantiles, TargetModelStats, TargetSummary } from "./aggregate.js";
+
+/**
+ * Static report page. No external assets, no scripts beyond none. Works in light and dark system
+ * themes and on a phone. Shared verbatim with the relay (relay/lib/reportHtml.ts is a copy made by
+ * scripts/sync-relay.mjs), so keep this file dependency-free.
+ */
+
+const esc = (s: unknown): string =>
+  String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
+
+export const fmtUsd = (n: number | null | undefined, digits?: number): string => {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "–";
+  const d = digits ?? (Math.abs(n) >= 100 ? 0 : Math.abs(n) >= 1 ? 2 : 4);
+  return (n < 0 ? "-$" : "$") + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+};
+export const fmtPct = (n: number | null | undefined, signed = true): string => {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "–";
+  const s = n > 0 && signed ? "+" : "";
+  return `${s}${n.toFixed(Math.abs(n) < 10 ? 1 : 0)}%`;
+};
+export const fmtMs = (n: number | null | undefined): string => (n === null || n === undefined ? "–" : n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`);
+const fmtInt = (n: number | null | undefined): string => (n === null || n === undefined ? "–" : Math.round(n).toLocaleString("en-US"));
+const q = (x: Quantiles | undefined): string => (!x || x.n === 0 ? "–" : `${fmtMs(x.p50)} / ${fmtMs(x.p95)}`);
+const share = (s: number | null | undefined): string => (s === null || s === undefined ? "–" : `${Math.round(s * 100)}%`);
+const methodLabel = (m: string | null | undefined): string => (m === "first-content" ? "first content token" : m === "first-byte" ? "first byte" : m === "mixed" ? "mixed methods" : "not comparable");
+
+/** "served by" line under a model: which upstream hosts each router reported. Only routers that name a host show up. */
+function upstreamNote(tm: { primary_upstreams?: Record<string, number>; target_upstreams?: Record<string, number> }, primaryName: string): string {
+  const fmt = (m: Record<string, number> | undefined) =>
+    Object.entries(m ?? {})
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}×${v}`)
+      .join(", ");
+  const p = fmt(tm.primary_upstreams), t = fmt(tm.target_upstreams);
+  if (!p && !t) return "";
+  return `<div class="muted small">${p ? `${esc(primaryName)} served by ${esc(p)}` : ""}${p && t ? "; " : ""}${t ? `target served by ${esc(t)}` : ""}</div>`;
+}
+
+const deltaClass = (n: number | null | undefined) => (n === null || n === undefined ? "" : n < -1 ? "good" : n > 1 ? "bad" : "flat");
+const delta = (n: number | null | undefined, title?: string) => `<span class="${deltaClass(n)}"${title ? ` title="${esc(title)}"` : ""}>${fmtPct(n)}</span>`;
+
+/** Comparable TTFT cell: both sides on one measurement, or an honest "not comparable". */
+function ttftCell(x: { primary_ttft: Quantiles; ttft: Quantiles; ttft_method: string | null; ttft_not_comparable?: number }): string {
+  if (!x.ttft_method || x.ttft.n === 0) {
+    const why = x.ttft_not_comparable ? `${x.ttft_not_comparable} pair${x.ttft_not_comparable === 1 ? "" : "s"} measured differently on the two sides` : "no streamed pairs";
+    return `<span class="muted">not comparable</span><div class="muted small">${esc(why)}</div>`;
+  }
+  return `${fmtMs(x.primary_ttft.p50)} / ${fmtMs(x.ttft.p50)}<div class="muted small">${esc(methodLabel(x.ttft_method))}, n=${x.ttft.n}${x.ttft_not_comparable ? `; ${x.ttft_not_comparable} not comparable` : ""}</div>`;
+}
+
+/** Per-side quantiles by measurement, shown without comparing across methods. */
+function ttftSides(x: { ttft_first_byte?: { primary: Quantiles; target: Quantiles }; ttft_first_content?: { primary: Quantiles; target: Quantiles } }, primaryName: string): string {
+  const parts: string[] = [];
+  const fb = x.ttft_first_byte, fc = x.ttft_first_content;
+  if (fb && (fb.primary.n || fb.target.n)) parts.push(`first byte p50: ${esc(primaryName)} ${fmtMs(fb.primary.p50)}${fb.primary.n ? ` (n=${fb.primary.n})` : ""}, target ${fmtMs(fb.target.p50)}${fb.target.n ? ` (n=${fb.target.n})` : ""}`);
+  if (fc && (fc.primary.n || fc.target.n)) parts.push(`first content p50: ${esc(primaryName)} ${fmtMs(fc.primary.p50)}${fc.primary.n ? ` (n=${fc.primary.n})` : ""}, target ${fmtMs(fc.target.p50)}${fc.target.n ? ` (n=${fc.target.n})` : ""}`);
+  return parts.length ? `<div class="muted small">${parts.join("; ")}</div>` : "";
+}
+
+function targetCard(t: TargetSummary, a: ReportAggregates, primaryName: string): string {
+  const name = t.name ?? t.target;
+  const low = (t.projection_confidence ?? a.projection?.confidence) === "low";
+  const m = t.measured;
+  const noOut = t.no_output ?? { primary: 0, target: 0 };
+  const tr = t.truncated ?? { pairs: 0, primary_only: 0, target_only: 0, both: 0 };
+  const cp = t.cost_complete_pairs;
+  const leak = t.reasoning_leak ?? { pairs: 0, primary: 0, target: 0 };
+  const h = t.headline ?? { delta_pct: t.delta_pct, basis: "as_served" as const, note: "" };
+  const jf = t.judge_fraction ?? 0.25;
+  const reasons = t.disagreement_reasons ?? [];
+  const subline =
+    t.projected_monthly_usd === null
+      ? "no priced pairs"
+      : low
+        ? `${fmtUsd(m?.target_cost_usd)} vs ${fmtUsd(m?.primary_cost_usd)} on ${esc(primaryName)} measured over ${fmtInt(m?.pairs)} priced pair${m?.pairs === 1 ? "" : "s"}; rough extrapolation ${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)}`
+        : `${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)} on ${esc(primaryName)} for the mirrored models`;
+  return `<div class="card">
+  <div class="card-h"><span class="name">${esc(name)}</span><span class="via">${t.via === "relay" ? "via relay" : t.via === "direct" ? "direct" : ""}</span></div>
+  <div class="big ${deltaClass(h.delta_pct)}">${fmtPct(h.delta_pct)}</div>
+  <div class="muted small">${h.basis === "cache_neutral" ? "cache-neutral cost delta (one side ran from a warm cache; as-served shown below)" : "as-served cost delta"}</div>
+  <div class="sub">${subline}</div>
+  <dl>
+    <dt>Δ as served</dt><dd>${delta(m?.delta_pct)} <span class="muted small">${fmtInt(m?.pairs)} priced pairs; ${fmtUsd(t.avg_cost_per_request_usd?.target, 5)} vs ${fmtUsd(t.avg_cost_per_request_usd?.primary, 5)} per request</span></dd>
+    <dt>Δ cache-neutral</dt><dd>${delta(t.delta_pct_cache_neutral)} <span class="muted small">cached tokens at full input price; cache share ${share(t.cache_share?.target)} vs ${share(t.cache_share?.primary)}</span></dd>
+    <dt>Δ price-only</dt><dd>${delta(t.delta_pct_price_only)} <span class="muted small">target prices on ${esc(primaryName)}'s token counts</span></dd>
+    <dt>Δ complete pairs</dt><dd>${delta(cp?.delta_pct)} <span class="muted small">${fmtInt(cp?.pairs)} of ${fmtInt(m?.pairs)} pairs finished normally on both sides</span></dd>
+    <dt>Truncated / no output</dt><dd>${fmtInt(tr.pairs)} truncated <span class="muted small">(${esc(primaryName)} only ${fmtInt(tr.primary_only)}, target only ${fmtInt(tr.target_only)}, both ${fmtInt(tr.both)})</span>; no output ${fmtInt(noOut.primary)} / ${fmtInt(noOut.target)} <span class="muted small">(${esc(primaryName)} / target)</span>${leak.pairs ? `; <span class="bad">reasoning leak ${fmtInt(leak.primary)} / ${fmtInt(leak.target)}</span>` : ""}${t.unpriced ? `; <span class="bad">${fmtInt(t.unpriced)} unpriced</span>` : ""}</dd>
+    <dt>Coverage</dt><dd>${fmtPct(t.coverage_pct, false)} of mirrored requests had a mapped model${(t.failing ?? []).length ? `; <span class="bad">${t.failing.length} model${t.failing.length === 1 ? "" : "s"} listed but failing</span>` : ""}</dd>
+    <dt>Latency p50 / p95</dt><dd>${q(t.latency)}</dd>
+    <dt>TTFT p50</dt><dd>${ttftCell(t)}${ttftSides(t, primaryName)}</dd>
+    <dt>Error rate</dt><dd>${t.error_rate === null ? "–" : fmtPct(t.error_rate * 100, false)} (${fmtInt(t.errors)} of ${fmtInt(t.requests_mirrored - t.unmapped_requests)}) <span class="muted small">plus ${fmtInt(noOut.target)} ok-but-empty</span></dd>
+    <dt>Agreement</dt><dd>${t.agreement_rate === null ? "not judged" : `${fmtPct(t.agreement_rate * 100, false)} <span class="muted">(n=${t.agreement_judged}, ${jf >= 1 ? "every completed pair judged" : `${Math.round(jf * 100)}% sample`})</span>`}</dd>
+  </dl>
+  ${reasons.length ? `<div class="muted small reasons"><strong>Why the judge called pairs different:</strong><ul>${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>` : ""}
+  ${t.cache_warning ? `<p class="warn">${esc(t.cache_warning)}</p>` : ""}
+</div>`;
+}
+
+function detailRow(tm: TargetModelStats, a: ReportAggregates, primaryName: string): string {
+  const cp = tm.cost_complete_pairs;
+  const noOut = tm.no_output ?? { primary: 0, target: 0 };
+  const tr = tm.truncated ?? { pairs: 0, primary_only: 0, target_only: 0, both: 0 };
+  const leak = tm.reasoning_leak ?? { pairs: 0, primary: 0, target: 0 };
+  const costPairs = tm.cost_pairs ?? tm.pairs;
+  const tok = tm.tokens;
+  const tokNote = tok
+    ? `<div class="muted small">out ${fmtInt(tok.primary.completion_tokens)} / ${fmtInt(tok.target.completion_tokens)}${tok.primary.reasoning_tokens || tok.target.reasoning_tokens ? ` (reasoning ${fmtInt(tok.primary.reasoning_tokens)} / ${fmtInt(tok.target.reasoning_tokens)})` : ""}; cached ${share(tm.cache_share?.primary)} / ${share(tm.cache_share?.target)}</div>`
+    : "";
+  return `<tr>
+  <td>${esc(a.targets.find((t) => t.target === tm.target)?.name ?? tm.target)}</td>
+  <td class="model">${esc(tm.model)}<div class="muted small">${esc(tm.target_model ?? "")}</div>${upstreamNote(tm, primaryName)}</td>
+  <td class="num">${fmtInt(tm.pairs)}${tm.unpriced ? `<div class="muted small">${fmtInt(tm.unpriced)} unpriced</div>` : ""}</td>
+  <td class="num">${fmtUsd(costPairs ? tm.primary_cost_usd / costPairs : null, 5)}</td>
+  <td class="num">${fmtUsd(costPairs ? tm.target_cost_usd / costPairs : null, 5)}</td>
+  <td class="num">${delta(tm.delta_pct, `as served over ${costPairs} priced pairs`)}${tokNote}</td>
+  <td class="num">${delta(tm.delta_pct_cache_neutral, "target cached tokens re-priced at full input rate")}</td>
+  <td class="num">${delta(tm.delta_pct_price_only, `target prices applied to ${primaryName} token counts`)}</td>
+  <td class="num">${delta(cp?.delta_pct)}<div class="muted small">n=${fmtInt(cp?.pairs)}</div></td>
+  <td class="num">${q(tm.primary_latency)}</td>
+  <td class="num">${q(tm.latency)}</td>
+  <td class="num">${ttftCell(tm)}</td>
+  <td class="num">${tm.error_rate === null ? "–" : fmtPct(tm.error_rate * 100, false)}${Object.keys(tm.error_types).length ? `<div class="muted small">${esc(Object.entries(tm.error_types).map(([k, v]) => `${k}×${v}`).join(", "))}</div>` : ""}</td>
+  <td class="num">${fmtInt(noOut.primary)} / ${fmtInt(noOut.target)}${leak.pairs ? `<div class="bad small">leak ${fmtInt(leak.primary)} / ${fmtInt(leak.target)}</div>` : ""}</td>
+  <td class="num">${tm.agreement ? `${fmtPct(tm.agreement.rate! * 100, false)} <span class="muted small">n=${tm.agreement.judged}</span>` : "–"}${(tm.disagreement_reasons ?? []).length ? `<div class="muted small reason" title="${esc(tm.disagreement_reasons.join(" | "))}">${esc(tm.disagreement_reasons[0].length > 70 ? tm.disagreement_reasons[0].slice(0, 70) + "…" : tm.disagreement_reasons[0])}</div>` : ""}</td>
+  <td class="num">${tr.pairs ? `${tr.pairs}<div class="muted small">${esc(primaryName)} only ${tr.primary_only}, target only ${tr.target_only}${tr.both ? `, both ${tr.both}` : ""}</div>` : "0"}</td>
+  <td class="num">${tm.tool_calls ? `${tm.tool_calls.valid_json}/${tm.tool_calls.pairs} valid, ${tm.tool_calls.name_match}/${tm.tool_calls.pairs} same tool` : "–"}</td>
+</tr>`;
+}
+
+export function renderReportHtml(a: ReportAggregates, opts: { published?: boolean; repoUrl?: string } = {}): string {
+  const repo = opts.repoUrl ?? "https://github.com/Works-OnMyDevice/routearena";
+  const p = a.primary;
+  const primaryName = p.provider === "openrouter" ? "OpenRouter" : p.provider === "openai" ? "OpenAI" : p.provider;
+  const periodText = a.period ? `${a.period.from} to ${a.period.to} (${a.period.days} day${a.period.days === 1 ? "" : "s"}${a.period.span_hours !== undefined && a.period.span_hours < 24 ? `, ${a.period.span_hours < 1 ? "under an hour" : `${a.period.span_hours.toFixed(1)} h`} of traffic` : ""})` : "no date range";
+  const costLabel = p.cost_source === "measured" ? "measured" : p.cost_source === "computed" ? "computed" : p.cost_source;
+  const lowConfidence = (a.projection?.confidence ?? "ok") === "low";
+  const scaledFrom = a.projection?.basis === "elapsed_time" ? "scaled from elapsed time" : `scaled from ${a.period?.days ?? 0} day${a.period?.days === 1 ? "" : "s"}`;
+
+  const targetCards = a.targets.map((t) => targetCard(t, a, primaryName)).join("\n");
+
+  const modelRows = a.models
+    .map((m) => {
+      const cells = a.targets
+        .map((t) => {
+          const tm = a.target_models.find((x) => x.target === t.target && x.model === m.model);
+          if (!tm) return `<td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td>`;
+          if (tm.pairs === 0) return `<td class="num muted">${tm.unmapped > 0 ? "unmapped" : "no pairs"}</td><td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td>`;
+          const costPairs = tm.cost_pairs ?? tm.pairs;
+          if (costPairs === 0) return `<td class="num muted">unpriced</td><td class="num muted">–</td><td class="num muted">–</td><td class="num">${q(tm.latency)}</td>`;
+          const perPair = tm.target_cost_usd / costPairs;
+          return `<td class="num ${deltaClass(tm.delta_pct)}" title="as served: ${fmtUsd(perPair, 5)} per request (computed) over ${costPairs} priced pairs">${fmtPct(tm.delta_pct)}</td><td class="num ${deltaClass(tm.delta_pct_cache_neutral)}" title="target cached tokens re-priced at full input rate">${fmtPct(tm.delta_pct_cache_neutral)}</td><td class="num ${deltaClass(tm.delta_pct_price_only)}" title="target prices on the primary's own token counts">${fmtPct(tm.delta_pct_price_only)}</td><td class="num">${q(tm.latency)}</td>`;
+        })
+        .join("");
+      return `<tr><td class="model">${esc(m.model)}</td><td class="num">${fmtInt(m.requests)}${m.no_output ? `<div class="muted small">${fmtInt(m.no_output)} no output</div>` : ""}</td><td class="num">${fmtInt(m.prompt_tokens + m.completion_tokens)}</td><td class="num">${fmtUsd(m.cost_usd)}</td><td class="num">${q(m.latency)}</td>${cells}</tr>`;
+    })
+    .join("\n");
+
+  const targetHeaders = a.targets.map((t) => `<th colspan="4">${esc(t.name ?? t.target)}</th>`).join("");
+  const targetSubHeaders = a.targets.map(() => `<th class="num">Δ as served</th><th class="num">Δ cache-neutral</th><th class="num">Δ price-only</th><th class="num">lat p50/p95</th>`).join("");
+
+  const detailRows = a.target_models
+    .filter((tm) => tm.pairs > 0 || tm.errors > 0)
+    .map((tm) => detailRow(tm, a, primaryName))
+    .join("\n");
+
+  const failing = a.targets
+    .filter((t) => (t.failing ?? []).length)
+    .map(
+      (t) => `<div class="gap"><h4>${esc(t.name ?? t.target)}: listed but failing</h4><ul>${t.failing
+        .map((f) => `<li><span class="model">${esc(f.model)}</span> → <span class="model">${esc(f.target_model ?? "")}</span> <span class="muted">${fmtInt(f.attempts)} of ${fmtInt(f.attempts)} attempts failed (${esc(f.error_type.replace(/_/g, " "))})</span></li>`)
+        .join("")}</ul></div>`,
+    )
+    .join("\n");
+  const gaps = a.targets
+    .filter((t) => t.gaps.length)
+    .map(
+      (t) => `<div class="gap"><h4>${esc(t.name ?? t.target)}</h4><ul>${t.gaps
+        .map((g) => `<li><span class="model">${esc(g.model)}</span> <span class="muted">${fmtInt(g.requests)} request${g.requests === 1 ? "" : "s"}</span>${g.suggestion ? `<span class="muted"> · possible match: <span class="model">${esc(g.suggestion)}</span> (not used)</span>` : ""}</li>`)
+        .join("")}</ul></div>`,
+    )
+    .join("\n");
+
+  const skipped = Object.entries(a.sampling.skipped)
+    .sort((x, y) => y[1] - x[1])
+    .map(([k, v]) => `${esc(k.replace(/_/g, " "))}: ${fmtInt(v)}`)
+    .join(", ");
+
+  const prices = a.method.prices
+    .filter((x) => x.captured || x.source)
+    .map((x) => `<li>${esc(x.target)}: price table captured ${esc(x.captured ?? "n/a")}${x.source ? ` from <a href="${esc(x.source)}">${esc(new URL(x.source).hostname)}</a>` : ""}</li>`)
+    .join("");
+
+  const spendStat = lowConfidence
+    ? `<div class="stat"><div class="k">Measured spend${costLabel === "measured" ? "" : ` (${esc(costLabel)})`}</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${fmtUsd(p.avg_cost_per_request_usd, 5)} per request over ${fmtInt(p.requests_ok - (p.unpriced ?? 0))} priced · rough extrapolation ${fmtUsd(p.monthly_usd)} / month (${esc(scaledFrom)})</div></div>`
+    : `<div class="stat"><div class="k">Current spend (${esc(costLabel)})</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${a.period && a.period.days !== 30 ? `${fmtUsd(p.monthly_usd)} / month ${esc(scaledFrom)}` : "over the period"} · ${fmtUsd(p.avg_cost_per_request_usd, 5)} per request</div></div>`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>RouteArena report</title>
+<style>
+:root{--bg:#fbfbfa;--fg:#1a1a1a;--muted:#6b6b6b;--line:#e4e4e0;--card:#ffffff;--good:#176b3a;--bad:#a12b2b;--flat:#6b6b6b;--accent:#2a4d9b;--warn-bg:#fff6e0;--warn-fg:#6b4b00;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#121313;--fg:#ececea;--muted:#9a9a96;--line:#2a2b2b;--card:#1b1c1c;--good:#5fcf8a;--bad:#ff7b7b;--flat:#9a9a96;--accent:#8fb0ff;--warn-bg:#2a2410;--warn-fg:#f0cd73}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:32px 0 10px}h4{margin:0 0 4px;font-size:14px}
+.lede{color:var(--muted);margin:0 0 20px}
+.topline{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0}
+.stat{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card)}
+.stat .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.stat .v{font-size:22px;font-weight:600;margin-top:2px}
+.stat .s{color:var(--muted);font-size:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.card{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--card)}
+.card-h{display:flex;justify-content:space-between;align-items:baseline}
+.card .name{font-weight:600}.card .via{color:var(--muted);font-size:12px}
+.card .big{font-size:30px;font-weight:700;margin:6px 0 2px}
+.card .sub{color:var(--muted);font-size:13px;min-height:2.6em}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;margin:10px 0 0;font-size:13px}dt{color:var(--muted)}dd{margin:0}
+.good{color:var(--good)}.bad{color:var(--bad)}.flat{color:var(--flat)}
+.muted{color:var(--muted)}.small{font-size:12px}
+.warn{background:var(--warn-bg);color:var(--warn-fg);border-radius:8px;padding:8px 10px;font-size:12.5px;margin:10px 0 0}
+.reasons{margin-top:10px}.reasons ul{margin:4px 0 0;padding-left:18px}.reason{white-space:normal;max-width:260px;text-align:left}
+.note{border-left:3px solid var(--accent);padding:6px 12px;margin:12px 0;color:var(--muted);font-size:13px}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13px;min-width:560px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:500;white-space:nowrap;background:var(--card);position:sticky;top:0}
+tr:last-child td{border-bottom:0}
+td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.model{font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere;min-width:150px}
+.lede,.sub,.method,.fee,.note,.warn{overflow-wrap:anywhere}
+.gap{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card);margin-bottom:10px}
+.gap ul{margin:4px 0 0;padding-left:18px}
+.method{color:var(--muted);font-size:13px}.method li{margin-bottom:4px}
+.fee{color:var(--muted);font-size:13px;margin-top:6px}
+footer{margin-top:40px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}
+a{color:var(--accent)}
+@media (max-width:600px){.card .big{font-size:26px}.stat .v{font-size:19px}}
+</style>
+</head>
+<body>
+<main>
+<h1>RouteArena report</h1>
+<p class="lede">Primary: <strong>${esc(primaryName)}</strong> · ${esc(periodText)} · ${fmtInt(p.requests)} requests seen, ${fmtInt(a.sampling.mirrored)} mirrored · generated ${esc(a.generated_at.slice(0, 16).replace("T", " "))} UTC</p>
+
+<div class="topline">
+  ${spendStat}
+  <div class="stat"><div class="k">Requests</div><div class="v">${fmtInt(p.requests_ok)}</div><div class="s">${fmtInt(p.errors)} failed on ${esc(primaryName)}${p.no_output ? `, ${fmtInt(p.no_output)} returned no output` : ""}</div></div>
+  <div class="stat"><div class="k">${esc(primaryName)} latency p50 / p95</div><div class="v">${q(p.latency)}</div><div class="s">TTFT p50 ${fmtMs(p.ttft.p50)} (${esc(p.ttft_method ? methodLabel(p.ttft_method) : "no streamed requests")}, streamed only)</div></div>
+  <div class="stat"><div class="k">Tokens in / out</div><div class="v">${fmtInt(p.prompt_tokens)} / ${fmtInt(p.completion_tokens)}</div><div class="s">as reported by ${esc(primaryName)}${p.cached_tokens ? `; ${fmtInt(p.cached_tokens)} cached` : ""}${p.reasoning_tokens ? `; ${fmtInt(p.reasoning_tokens)} reasoning` : ""}</div></div>
+</div>
+${lowConfidence ? `<p class="note"><strong>Projection confidence: low.</strong> ${esc(a.projection?.reason ?? "")}. Monthly figures on this page are rough extrapolations; read the measured totals and per-request averages first.</p>` : ""}
+${p.topup_fee_usd !== null ? `<p class="fee">OpenRouter credit top-up fee at 5.5%: about ${fmtUsd(p.topup_fee_usd)} / month on top of the spend above. Not applied to targets. Hidden with --byok.</p>` : ""}
+
+<h2>Cost on each target</h2>
+<p class="muted small">The big number is the cost delta for the mirrored, mapped models over pairs priced on both sides. It is the as-served delta (what each side actually charged) unless one side was served from a much warmer prompt cache, in which case the cache-neutral delta leads and a note says so. Under it, all four views: as served, cache-neutral (the target's cached tokens at its full input price), price-only (the target's price list on ${esc(primaryName)}'s own token counts, which isolates price from how much each model chose to write), and complete pairs (as served, only where both sides finished normally). Target costs are computed from public price tables; ${esc(primaryName)} costs are ${esc(costLabel)}.</p>
+<div class="cards">
+${targetCards || '<p class="muted">No targets received mirrored traffic. Add a target key or claim free credits, then run again.</p>'}
+</div>
+
+<h2>Per model</h2>
+<div class="tablewrap"><table>
+<thead>
+<tr><th rowspan="2">Model (canonical)</th><th class="num" rowspan="2">Requests</th><th class="num" rowspan="2">Tokens</th><th class="num" rowspan="2">${esc(primaryName)} cost</th><th class="num" rowspan="2">${esc(primaryName)} lat p50/p95</th>${targetHeaders}</tr>
+<tr>${targetSubHeaders}</tr>
+</thead>
+<tbody>${modelRows}</tbody>
+</table></div>
+
+${
+  detailRows
+    ? `<h2>Paired comparison detail</h2>
+<p class="muted small">Only requests that returned on both sides. Per-request costs are averages over priced pairs. Δ as served: each side's own bill. Δ cache-neutral: target cached tokens at the full input rate. Δ price-only: target prices on ${esc(primaryName)}'s token counts. Δ complete: as served, over pairs where both sides finished with stop or tool_calls and neither was empty. TTFT shows ${esc(primaryName)} / target on one measurement, or "not comparable". No output counts ${esc(primaryName)} / target responses with status ok and nothing in them; a "leak" line under it counts responses whose content was the model's reasoning channel instead of an answer.</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Target</th><th>Model</th><th class="num">Pairs</th><th class="num">${esc(primaryName)} $/req</th><th class="num">Target $/req</th><th class="num">Δ as served</th><th class="num">Δ cache-neutral</th><th class="num">Δ price-only</th><th class="num">Δ complete</th><th class="num">${esc(primaryName)} lat</th><th class="num">Target lat</th><th class="num">TTFT p50</th><th class="num">Errors</th><th class="num">No output</th><th class="num">Agreement</th><th class="num">Truncated</th><th class="num">Tool calls</th></tr></thead>
+<tbody>${detailRows}</tbody>
+</table></div>`
+    : ""
+}
+
+<h2>Coverage gaps</h2>
+<p class="muted small">Models in this traffic with no explicit mapping on a target, and mapped models the target rejected every time. Nothing was projected for these; a possible match is shown only as a hint.</p>
+${failing}
+${gaps || (failing ? "" : '<p class="muted">None. Every model seen had a mapping on every target.</p>')}
+
+<h2>Method</h2>
+<ul class="method">
+  <li>${esc(a.method.costs)}</li>
+  ${a.method.cost_deltas ? `<li>${esc(a.method.cost_deltas)}</li>` : ""}
+  ${a.method.complete_pairs ? `<li>${esc(a.method.complete_pairs)}</li>` : ""}
+  ${a.method.empty_outputs ? `<li>${esc(a.method.empty_outputs)}</li>` : ""}
+  <li>${esc(a.method.sampling)}${skipped ? ` Not mirrored: ${skipped}.` : ""}</li>
+  <li>${esc(a.method.ttft)}</li>
+  <li>${esc(a.method.agreement)}${a.method.judge_model ? ` Judge model: <span class="model">${esc(a.method.judge_model)}</span>.` : " No judge model was available, so only exact matches were scored."}</li>
+  ${prices}
+  <li>${esc(a.method.projection ?? "Monthly figures scale the observed period to 30 days.")} Nothing here is a quote; prices change.</li>
+  ${a.method.sample_size_note ? `<li><strong>${esc(a.method.sample_size_note)}</strong></li>` : ""}
+</ul>
+
+<footer>Generated with <a href="${esc(repo)}">RouteArena</a> v${esc(a.tool.version)}${opts.published ? " · this page contains aggregates only, no prompts or completions" : ""}.</footer>
+</main>
+</body>
+</html>
+`;
+}

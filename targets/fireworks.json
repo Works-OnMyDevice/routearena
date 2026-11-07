@@ -1,0 +1,92 @@
+{
+  "id": "fireworks",
+  "name": "Fireworks AI",
+  "baseUrl": "https://api.fireworks.ai/inference/v1",
+  "keyEnv": "FIREWORKS_API_KEY",
+  "judgeModel": "accounts/fireworks/models/gpt-oss-120b",
+  "pricesSource": "https://docs.fireworks.ai/serverless/pricing",
+  "pricesCaptured": "2026-11-05",
+  "notes": "https://docs.fireworks.ai/serverless/pricing and https://fireworks.ai/pricing (Standard mode); model ids verified on https://fireworks.ai/models/fireworks/<slug>",
+  "models": {
+    "deepseek/deepseek-v4.1-flash": {
+      "id": "accounts/fireworks/models/deepseek-v4p1-flash",
+      "input_per_m": 0.3,
+      "output_per_m": 1.2,
+      "cached_input_per_m": 0.006
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "id": "accounts/fireworks/models/deepseek-v4p1-flash-1017",
+      "input_per_m": 0.3,
+      "output_per_m": 1.2,
+      "cached_input_per_m": 0.006
+    },
+    "meta/muse-spark-open": {
+      "id": "accounts/fireworks/models/muse-spark-open",
+      "input_per_m": 1.25,
+      "output_per_m": 4.25,
+      "cached_input_per_m": 0.15
+    },
+    "minimax/minimax-m3": {
+      "id": "accounts/fireworks/models/minimax-m3",
+      "input_per_m": 0.3,
+      "output_per_m": 1.2,
+      "cached_input_per_m": 0.06
+    },
+    "minimax/minimax-m3.1-flash": {
+      "id": "accounts/fireworks/models/minimax-m3p1-flash",
+      "input_per_m": 0.15,
+      "output_per_m": 0.6,
+      "cached_input_per_m": 0.015,
+      "note": "price from model page; not in docs headline table"
+    },
+    "moonshotai/kimi-k3": {
+      "id": "accounts/fireworks/models/kimi-k3",
+      "input_per_m": 3.0,
+      "output_per_m": 15.0,
+      "cached_input_per_m": 0.3
+    },
+    "moonshotai/kimi-k3.1-pro": {
+      "id": "accounts/fireworks/models/kimi-k3p1-pro",
+      "input_per_m": 2.0,
+      "output_per_m": 10.0,
+      "cached_input_per_m": 0.2
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "id": "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+      "input_per_m": 0.6,
+      "output_per_m": 2.4,
+      "cached_input_per_m": 0.12,
+      "note": "Preview"
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "id": "accounts/fireworks/models/nemotron-lightning-3p5-30b-a3b",
+      "input_per_m": 0.05,
+      "output_per_m": 0.2,
+      "cached_input_per_m": 0.01
+    },
+    "openai/gpt-oss-120b": {
+      "id": "accounts/fireworks/models/gpt-oss-120b",
+      "input_per_m": 0.15,
+      "output_per_m": 0.6,
+      "cached_input_per_m": 0.015
+    },
+    "qwen/qwen3.8-max-0902": {
+      "id": "accounts/fireworks/models/qwen3p8-max",
+      "input_per_m": 2.0,
+      "output_per_m": 6.0,
+      "cached_input_per_m": 0.25
+    },
+    "z-ai/glm-5.3": {
+      "id": "accounts/fireworks/models/glm-5p3",
+      "input_per_m": 1.4,
+      "output_per_m": 4.4,
+      "cached_input_per_m": 0.26
+    },
+    "z-ai/glm-5.3-flash": {
+      "id": "accounts/fireworks/models/glm-5p3-flash",
+      "input_per_m": 0.15,
+      "output_per_m": 0.5,
+      "cached_input_per_m": 0.03
+    }
+  }
+}

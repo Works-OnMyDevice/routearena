@@ -1,0 +1,13 @@
+.env
+.env.*
+.routearena/
+routearena-report/
+relay/
+test/
+docs/
+scripts/
+src/
+.github/
+tsconfig.json
+eslint.config.js
+*.log

@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+.env*
+!.env.example
+.dev.vars
+pool.local.json
+.wrangler-test-*/

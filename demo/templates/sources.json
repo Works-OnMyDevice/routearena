@@ -1,0 +1,510 @@
+[
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Web_scraping"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Large_language_model"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Mixture_of_experts"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Reverse_proxy"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Transformer_(deep_learning)"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Representational_state_transfer"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Byte_pair_encoding"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Content_delivery_network"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/HTTP/3"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Semantic_versioning"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Robots.txt"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/JSON-LD"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Schema.org"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Percentile"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Server-sent_events"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Rate_limiting"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Open_source"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://en.wikipedia.org/wiki/Cheerio_(software)"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://blog.cloudflare.com/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://github.blog/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://vercel.com/blog"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://www.theguardian.com/international"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://www.bbc.com/news"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://www.npr.org/sections/news/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://news.ycombinator.com/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://arstechnica.com/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://www.theverge.com/"
+  },
+  {
+    "template": "article-extractor",
+    "url": "https://techcrunch.com/"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.apple.com/shop/buy-iphone"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.apple.com/macbook-air/"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.raspberrypi.com/products/raspberry-pi-5/"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.adafruit.com/product/4564"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.sparkfun.com/products/15443"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://shop.lego.com/en-us/product/millennium-falcon-75192"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.framework.com/products/laptop13-diy-intel-ultra-1"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.keychron.com/products/keychron-k2-wireless-mechanical-keyboard"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.logitech.com/en-us/products/mice/mx-master-3s.html"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.bhphotovideo.com/c/product/1734000-REG/"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.etsy.com/listing/1211406478/"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.ebay.com/itm/155012345678"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.bestbuy.com/site/apple-airpods-pro-2/6447382.p"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.homedepot.com/p/205501512"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.anker.com/products/a1647"
+  },
+  {
+    "template": "ecommerce-product",
+    "url": "https://www.steelseries.com/gaming-headsets/arctis-nova-7"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.cloudflare.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://vercel.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://supabase.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.stripe.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.anthropic.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://openrouter.ai/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.tokenrouter.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://groq.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.together.ai/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://deepinfra.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://fireworks.ai/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://posthog.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://resend.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://upstash.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.mozilla.org/en-US/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.hashicorp.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.docker.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.jetbrains.com/"
+  },
+  {
+    "template": "company-enrichment",
+    "url": "https://www.atlassian.com/"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.tokenrouter.com/docs/faq/"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://openrouter.ai/docs/faq"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://stripe.com/docs/faqs"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.cloudflare.com/learning/dns/what-is-dns/"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.irs.gov/faqs"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://help.github.com/"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.npmjs.com/policies/terms"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://docs.npmjs.com/about-npm"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.python.org/doc/"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://nodejs.org/en/about"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://www.rust-lang.org/learn"
+  },
+  {
+    "template": "faq-extractor",
+    "url": "https://letsencrypt.org/docs/faq/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.tokenrouter.com/contact-us/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.cloudflare.com/contact/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.mozilla.org/en-US/contact/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.eff.org/about/contact"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.wikimedia.org/contact/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.redcross.org/contact-us.html"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.mit.edu/contact/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.nasa.gov/contact/"
+  },
+  {
+    "template": "contact-info-extractor",
+    "url": "https://www.un.org/en/contact-us"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/openai/openai-node"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/BerriAI/litellm"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/cheeriojs/cheerio"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/vercel/next.js"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/supabase/supabase"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/tj/commander.js"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/nodejs/undici"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/anthropics/anthropic-sdk-typescript"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/ollama/ollama"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/vllm-project/vllm"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/upstash/redis-js"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/resend/resend-node"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/microsoft/TypeScript"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/denoland/deno"
+  },
+  {
+    "template": "github-repo",
+    "url": "https://github.com/oven-sh/bun"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://boards.greenhouse.io/anthropic"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://jobs.lever.co/openai"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://www.cloudflare.com/careers/jobs/"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://vercel.com/careers"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://supabase.com/careers"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://stripe.com/jobs/search"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://groq.com/careers/"
+  },
+  {
+    "template": "job-posting",
+    "url": "https://www.together.ai/careers"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://platform.openai.com/docs/api-reference/chat/create"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://openrouter.ai/docs/api-reference/overview"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://www.tokenrouter.com/docs/management-api-documentation/"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://www.tokenrouter.com/docs/rate-limits-concurrency/"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://console.groq.com/docs/openai"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://docs.together.ai/docs/openai-api-compatibility"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://deepinfra.com/docs/openai_api"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://docs.fireworks.ai/tools-sdks/openai-compatibility"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://nodejs.org/api/http.html"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://vercel.com/docs/functions"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://upstash.com/docs/redis/overall/getstarted"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://resend.com/docs/api-reference/emails/send-email"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://docs.npmjs.com/cli/v10/commands/npm-publish"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://docs.github.com/en/actions/writing-workflows/quickstart"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://docs.python.org/3/library/json.html"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://redis.io/docs/latest/commands/incrbyfloat/"
+  },
+  {
+    "template": "docs-page",
+    "url": "https://commander.js.org/"
+  }
+]

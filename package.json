@@ -1,0 +1,33 @@
+{
+  "name": "routearena",
+  "version": "0.1.0",
+  "description": "See what your LLM traffic would cost on other providers. Your keys stay on your machine.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "routearena": "dist/cli.js" },
+  "main": "dist/index.js",
+  "files": ["dist", "targets", "demo/workload.jsonl", "AGENTS.md", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
+    "dev": "tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "eslint src test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "repository": { "type": "git", "url": "git+https://github.com/Works-OnMyDevice/routearena.git" },
+  "homepage": "https://github.com/Works-OnMyDevice/routearena#readme",
+  "keywords": ["llm", "openrouter", "openai", "cost", "proxy", "router", "tokenrouter", "groq", "together", "deepinfra", "fireworks"],
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@eslint/js": "^9.9.0",
+    "eslint": "^9.9.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

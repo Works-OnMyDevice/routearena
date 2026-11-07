@@ -1,0 +1,243 @@
+{
+  "id": "deepinfra",
+  "name": "DeepInfra",
+  "baseUrl": "https://api.deepinfra.com/v1/openai",
+  "keyEnv": "DEEPINFRA_API_KEY",
+  "judgeModel": "openai/gpt-oss-120b",
+  "pricesSource": "https://api.deepinfra.com/models/list",
+  "pricesCaptured": "2026-11-05",
+  "notes": "https://api.deepinfra.com/models/list (public JSON; $/M = cents_per_*_token x 1e4, discount applied) cross-checked with https://deepinfra.com/pricing",
+  "models": {
+    "deepseek/deepseek-chat": {
+      "id": "deepseek-ai/DeepSeek-V3",
+      "input_per_m": 0.32,
+      "output_per_m": 0.89
+    },
+    "deepseek/deepseek-chat-v3.1": {
+      "id": "deepseek-ai/DeepSeek-V3.1",
+      "input_per_m": 0.25,
+      "output_per_m": 0.95,
+      "cached_input_per_m": 0.13
+    },
+    "deepseek/deepseek-r1-0528": {
+      "id": "deepseek-ai/DeepSeek-R1-0528",
+      "input_per_m": 0.5,
+      "output_per_m": 2.15,
+      "cached_input_per_m": 0.35
+    },
+    "deepseek/deepseek-v3.2": {
+      "id": "deepseek-ai/DeepSeek-V3.2",
+      "input_per_m": 0.26,
+      "output_per_m": 0.38,
+      "cached_input_per_m": 0.13
+    },
+    "deepseek/deepseek-v4-flash": {
+      "id": "deepseek-ai/DeepSeek-V4-Flash",
+      "input_per_m": 0.09,
+      "output_per_m": 0.18,
+      "cached_input_per_m": 0.018
+    },
+    "deepseek/deepseek-v4-pro": {
+      "id": "deepseek-ai/DeepSeek-V4-Pro",
+      "input_per_m": 1.3,
+      "output_per_m": 2.6,
+      "cached_input_per_m": 0.1
+    },
+    "deepseek/deepseek-v4-pro-0813": {
+      "id": "deepseek-ai/DeepSeek-V4-Pro-0813",
+      "input_per_m": 1.3,
+      "output_per_m": 2.6,
+      "cached_input_per_m": 0.1
+    },
+    "deepseek/deepseek-v4.1-flash": {
+      "id": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "input_per_m": 0.14,
+      "output_per_m": 0.42,
+      "cached_input_per_m": 0.0042,
+      "note": "temporary 30% discount applied (list price 0.2/0.6)"
+    },
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "id": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "input_per_m": 0.098,
+      "output_per_m": 0.294,
+      "cached_input_per_m": 0.00294,
+      "note": "temporary 51% discount applied (list price 0.2/0.6)"
+    },
+    "google/gemma-3-27b-it": {
+      "id": "google/gemma-3-27b-it",
+      "input_per_m": 0.08,
+      "output_per_m": 0.16
+    },
+    "google/gemma-4-31b-it": {
+      "id": "google/gemma-4-31B-it",
+      "input_per_m": 0.2,
+      "output_per_m": 0.4
+    },
+    "meta-llama/llama-3.1-8b-instruct": {
+      "id": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+      "input_per_m": 0.02,
+      "output_per_m": 0.04
+    },
+    "meta-llama/llama-3.3-70b-instruct": {
+      "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "input_per_m": 0.1,
+      "output_per_m": 0.32
+    },
+    "meta-llama/llama-4-scout": {
+      "id": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+      "input_per_m": 0.1,
+      "output_per_m": 0.3
+    },
+    "minimax/minimax-m3": {
+      "id": "MiniMaxAI/MiniMax-M3",
+      "input_per_m": 0.28,
+      "output_per_m": 1.1,
+      "cached_input_per_m": 0.056
+    },
+    "mistralai/mistral-nemo": {
+      "id": "mistralai/Mistral-Nemo-Instruct-2407",
+      "input_per_m": 0.029,
+      "output_per_m": 0.03
+    },
+    "mistralai/mistral-small-3.2-24b-instruct": {
+      "id": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+      "input_per_m": 0.075,
+      "output_per_m": 0.2
+    },
+    "moonshotai/kimi-k2.6": {
+      "id": "moonshotai/Kimi-K2.6",
+      "input_per_m": 0.75,
+      "output_per_m": 3.5,
+      "cached_input_per_m": 0.15
+    },
+    "moonshotai/kimi-k3": {
+      "id": "moonshotai/Kimi-K3",
+      "input_per_m": 2.85,
+      "output_per_m": 14.25,
+      "cached_input_per_m": 0.285
+    },
+    "moonshotai/kimi-k3.1-pro": {
+      "id": "moonshotai/Kimi-K3.1-Pro",
+      "input_per_m": 1.9,
+      "output_per_m": 9.5,
+      "cached_input_per_m": 0.19,
+      "note": "temporary 5% discount applied (list price 2.0/10.0)"
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "id": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B",
+      "input_per_m": 0.5,
+      "output_per_m": 2.2,
+      "cached_input_per_m": 0.1
+    },
+    "nvidia/nemotron-3.5-lightning": {
+      "id": "nvidia/NVIDIA-Nemotron-3.5-Lightning",
+      "input_per_m": 0.06,
+      "output_per_m": 0.16,
+      "cached_input_per_m": 0.03
+    },
+    "openai/gpt-oss-120b": {
+      "id": "openai/gpt-oss-120b",
+      "input_per_m": 0.037,
+      "output_per_m": 0.17
+    },
+    "openai/gpt-oss-20b": {
+      "id": "openai/gpt-oss-20b",
+      "input_per_m": 0.03,
+      "output_per_m": 0.14
+    },
+    "qwen/qwen-2.5-72b-instruct": {
+      "id": "Qwen/Qwen2.5-72B-Instruct",
+      "input_per_m": 0.36,
+      "output_per_m": 0.4
+    },
+    "qwen/qwen3-235b-a22b-2507": {
+      "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "input_per_m": 0.09,
+      "output_per_m": 0.55
+    },
+    "qwen/qwen3-32b": {
+      "id": "Qwen/Qwen3-32B",
+      "input_per_m": 0.08,
+      "output_per_m": 0.28
+    },
+    "qwen/qwen3-coder": {
+      "id": "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo",
+      "input_per_m": 0.3,
+      "output_per_m": 1.0,
+      "cached_input_per_m": 0.1
+    },
+    "qwen/qwen3-next-80b-a3b-instruct": {
+      "id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "input_per_m": 0.09,
+      "output_per_m": 1.1
+    },
+    "qwen/qwen3.5-397b-a17b": {
+      "id": "Qwen/Qwen3.5-397B-A17B",
+      "input_per_m": 0.45,
+      "output_per_m": 3.0,
+      "cached_input_per_m": 0.22
+    },
+    "qwen/qwen3.5-9b": {
+      "id": "Qwen/Qwen3.5-9B",
+      "input_per_m": 0.1,
+      "output_per_m": 0.15
+    },
+    "qwen/qwen3.7-max": {
+      "id": "Qwen/Qwen3.7-Max",
+      "input_per_m": 2.5,
+      "output_per_m": 7.5,
+      "cached_input_per_m": 0.5
+    },
+    "qwen/qwen3.8-27b": {
+      "id": "Qwen/Qwen3.8-27B",
+      "input_per_m": 0.15,
+      "output_per_m": 1.875,
+      "cached_input_per_m": 0.0375,
+      "note": "temporary 25% discount applied (list price 0.2/2.5)"
+    },
+    "qwen/qwen3.8-flash": {
+      "id": "Qwen/Qwen3.8-Flash",
+      "input_per_m": 0.113,
+      "output_per_m": 0.382,
+      "cached_input_per_m": 0.0141
+    },
+    "qwen/qwen3.8-max-0902": {
+      "id": "Qwen/Qwen3.8-Max",
+      "input_per_m": 1.65,
+      "output_per_m": 4.951,
+      "cached_input_per_m": 0.206
+    },
+    "z-ai/glm-4.6": {
+      "id": "zai-org/GLM-4.6",
+      "input_per_m": 0.5,
+      "output_per_m": 2.0,
+      "cached_input_per_m": 0.1
+    },
+    "z-ai/glm-4.7": {
+      "id": "zai-org/GLM-4.7",
+      "input_per_m": 0.4,
+      "output_per_m": 1.75,
+      "cached_input_per_m": 0.08
+    },
+    "z-ai/glm-5.2": {
+      "id": "zai-org/GLM-5.2",
+      "input_per_m": 0.5625,
+      "output_per_m": 1.8,
+      "cached_input_per_m": 0.105,
+      "note": "temporary 25% discount applied (list price 0.75/2.4)"
+    },
+    "z-ai/glm-5.3": {
+      "id": "zai-org/GLM-5.3",
+      "input_per_m": 0.5625,
+      "output_per_m": 2.5,
+      "cached_input_per_m": 0.125,
+      "note": "temporary 38% discount applied (list price 0.9/4.0)"
+    },
+    "z-ai/glm-5.3-flash": {
+      "id": "zai-org/GLM-5.3-Flash",
+      "input_per_m": 0.15,
+      "output_per_m": 0.5,
+      "cached_input_per_m": 0.03
+    }
+  }
+}

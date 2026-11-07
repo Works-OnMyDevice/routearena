@@ -1,0 +1,50 @@
+{
+  "article-extractor": {
+    "slug": "article-extractor",
+    "fields": ["url", "title", "authors", "publishedAt", "text", "excerpt", "wordCount", "readingTimeMinutes", "tags", "image", "headings"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nExtract the main article from this page. `text` is the article body (first 1200 characters is enough), `excerpt` is one sentence, `headings` is an array of section headings, `authors` and `tags` are arrays.\n\n{{page}}"
+  },
+  "ecommerce-product": {
+    "slug": "ecommerce-product-scraper",
+    "fields": ["url", "name", "brand", "price", "currency", "availability", "sku", "rating", "images", "variants"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nExtract the product on this page. `price` is a number, `currency` an ISO code, `availability` one of in_stock, out_of_stock, preorder, unknown, `variants` an array of {name, price}. Prefer JSON-LD Product data when present.\n\n{{page}}"
+  },
+  "company-enrichment": {
+    "slug": "company-enrichment-scraper",
+    "fields": ["domain", "companyName", "description", "socials", "emails", "phones", "address", "techHints", "employeeCountHint", "foundingDate"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nBuild a company profile from this homepage. `socials` is an object keyed by network (twitter, linkedin, github, youtube, instagram, facebook) with URLs, `emails` and `phones` are arrays, `techHints` is an array of technologies mentioned, `employeeCountHint` is a string if the page hints at size.\n\n{{page}}"
+  },
+  "faq-extractor": {
+    "slug": "faq-extractor-scraper",
+    "fields": ["url", "pageTitle", "questionCount", "faqs"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nExtract every question-and-answer pair on this page. `faqs` is an array of {position, question, answer, source} where source is \"jsonld\" if it came from schema.org FAQPage data, otherwise \"heuristic\". Keep answers under 300 characters each.\n\n{{page}}"
+  },
+  "contact-info-extractor": {
+    "slug": "contact-info-extractor",
+    "fields": ["website", "organizationName", "emails", "phones", "socials", "addresses", "contactFormUrl"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nFind the organization's contact details on this page. `emails`, `phones`, `addresses` are arrays of strings; `socials` is an array of URLs; `contactFormUrl` is a URL or null.\n\n{{page}}"
+  },
+  "github-repo": {
+    "slug": "github-repo-scraper",
+    "fields": ["fullName", "description", "url", "stars", "forks", "language", "topics", "license", "latestRelease", "owner"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nExtract repository metadata from this GitHub page. `stars` and `forks` are integers (expand 1.2k to 1200), `topics` is an array of strings, `latestRelease` is the tag name or null.\n\n{{page}}"
+  },
+  "job-posting": {
+    "slug": "greenhouse-jobs-scraper",
+    "fields": ["company", "title", "departments", "location", "applyUrl", "firstPublishedAt", "content"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nExtract the job posting on this page. `departments` is an array, `content` is a plain-text summary of responsibilities and requirements under 800 characters.\n\n{{page}}"
+  },
+  "docs-page": {
+    "slug": "docs-crawler-scraper",
+    "fields": ["url", "title", "breadcrumbs", "headings", "codeBlockCount", "wordCount", "sectionPath", "summary"],
+    "system": "You are the extraction step of a web scraping API. Given the text of a web page, return a single JSON object with exactly the requested fields. Use null for anything the page does not contain. Do not invent values. Output JSON only.",
+    "user": "Page URL: {{url}}\nFields: {{fields}}\n\nThis is a documentation page. `breadcrumbs` and `headings` are arrays of strings in page order, `codeBlockCount` is an integer estimate, `sectionPath` is the doc section inferred from the URL, `summary` is two sentences describing what the page teaches.\n\n{{page}}"
+  }
+}
