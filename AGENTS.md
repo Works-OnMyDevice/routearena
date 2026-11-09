@@ -14,7 +14,7 @@ You are an AI agent helping a developer find out how their LLM traffic behaves a
 
 4. Live comparison:
    - If you are operating inside the human's codebase AND it creates an OpenAI-compatible client (search for `new OpenAI(`, `baseURL`, `base_url`, `openai.OpenAI(`): set that client's baseURL to http://localhost:4000/v1 (keep their key), run npx routearena@latest start --daemon --json, and tell the human to use their app normally for a few hours or a day (the default mirrors 10% of requests; for a short test pass --sample 1 to start so every request is mirrored). Numbers from fewer than about 50 mirrored requests are rough; the report says so.
-   - Otherwise (chat only, or the codebase has no OpenAI-compatible client): run npx routearena@latest demo --models <ids> --json with the model ids from step 2 (comma-separated). This sends 40 real web-extraction prompts through the primary and mirrors them to every reachable target; it costs a few cents per router.
+   - Otherwise (chat only, or the codebase has no OpenAI-compatible client): run npx routearena@latest start --daemon --sample 1 --json and have the human point any OpenAI-compatible script, notebook or app they already use at http://localhost:4000/v1 with their usual key, then use it as they normally would for a while. RouteArena sends nothing of its own; it only mirrors what the human's code sends.
 
 5. Report: npx routearena@latest report --json   (add --judge-sample 1 to judge every pair instead of a 25% sample; a few cents more)
    First, show the human the `ascii` field of the JSON exactly as it is, inside a code block, without reflowing it. It is the one-screen picture of the comparison.
@@ -25,6 +25,6 @@ You are an AI agent helping a developer find out how their LLM traffic behaves a
    TTFT is only shown when both sides were measured the same way. Agreement is noisy: a router asked the same prompt twice does not always agree with itself, so quote the judge's reasons (disagreement_reasons) and compare routers with each other, not against 100%.
    Summarize for the human: per-request cost on each side where reported, tokens, latency p50/p95 and TTFT, empty answers and rejected models, agreement with reasons. Offer: npx routearena@latest report --publish --json for a shareable page (aggregates only, no prompts).
 
-6. Cleanup: if you ran start --daemon, run npx routearena@latest stop and remind the human to revert baseURL. (demo runs its own proxy in-process; nothing to stop.) Add .routearena/ and routearena-report/ to the project's .gitignore: the log keeps full completions from both sides and must not be committed.
+6. Cleanup: if you ran start --daemon, run npx routearena@latest stop and remind the human to revert baseURL. Add .routearena/ and routearena-report/ to the project's .gitignore: the log keeps full completions from both sides and must not be committed.
 
 Rules: do not change any file other than .env, .gitignore, and the one baseURL line. Do not invent numbers; a number that is not in report.json does not exist. If a command fails, show its "fix" field to the human. The free-credits step needs a human to click an email link; if no human is available, use --no-credits.

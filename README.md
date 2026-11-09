@@ -9,7 +9,6 @@ Targets: **TokenRouter, Together AI, Groq, DeepInfra, Fireworks AI, OpenAI**. Ad
 ```sh
 npx routearena@latest check                 # finds keys in env / .env
 npx routearena@latest start                 # live: point your SDK's baseURL at http://localhost:4000/v1
-npx routearena@latest demo --models <ids>   # or: send a real extraction workload with the models you use
 npx routearena@latest report                # writes routearena-report/index.html and report.json
 ```
 
@@ -55,16 +54,11 @@ Monthly extrapolations are labelled rough until the log spans a day and 50 mirro
 | `check` | Node version, keys found, usable primaries and targets, credit balance, next step |
 | `init` | Writes `.routearena/config.json`; `--free-credits --email` claims TokenRouter credits; `--no-credits` skips; `--map` sets a model id for a target |
 | `start` | Local proxy; `--daemon` detaches, `stop` kills it |
-| `demo --models <ids>` | Sends 40 real web-extraction prompts through the proxy with the models you name, 100% mirrored, then builds the report |
 | `report` | Aggregates the log; `--publish` prints a shareable URL (aggregates only); `--judge-sample 1` judges every mirrored pair |
 | `credits` | Remaining free-credit budget and expiry |
 | `targets` | Target list, the key variable each needs, and whether one is set |
 
 Keys are read from the environment or a `.env` in the current directory: `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TOKENROUTER_API_KEY`, `TOGETHER_API_KEY`, `GROQ_API_KEY`, `DEEPINFRA_API_KEY`, `FIREWORKS_API_KEY`.
-
-## Demo workload
-
-`routearena demo` sends real extraction prompts built from the extraction schemas of a production web-scraping API (article, product, company, FAQ, contact, repo, job, docs) over real public pages fetched when the workload was built. Nothing synthetic. The prompts carry no model; you name the models. See [`demo/README.md`](demo/README.md).
 
 ## Development
 

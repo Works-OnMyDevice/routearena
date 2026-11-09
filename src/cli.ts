@@ -25,12 +25,11 @@ import {
   type PrimaryId,
 } from "./config.js";
 import { fetchBalance, startClaim, waitForVerification } from "./credits/claim.js";
-import { assignModels, loadWorkload, runDemo } from "./demo/run.js";
 import { startProxy } from "./proxy/server.js";
 import { buildReport } from "./report/build.js";
 import { fmtMs, fmtPct, fmtUsd } from "./report/html.js";
 import { publishAggregates } from "./report/publish.js";
-import { loadTargets, resolveTargets, targetStatus, unknownTargetIds } from "./targets/index.js";
+import { loadTargets, targetStatus, unknownTargetIds } from "./targets/index.js";
 
 const program = new Command();
 const VERSION = pkgVersion();
@@ -64,15 +63,6 @@ function jsonOpt(cmd: Command): Command {
   return cmd.option("--json", "print a single JSON object to stdout", false);
 }
 
-const MODELS_FIX = "Pass --models with the OpenRouter-style model ids your traffic uses, comma-separated, e.g. --models openai/gpt-4o-mini,deepseek/deepseek-chat. Your OpenRouter activity page (openrouter.ai/activity) lists the ids you already pay for; RouteArena ships no model list and picks none for you.";
-
-/** Parse `--models a,b,c` into trimmed, non-empty ids. */
-function parseModels(raw: unknown): string[] {
-  if (typeof raw !== "string" || !raw.trim()) throw new CliError("--models is required.", MODELS_FIX);
-  const ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
-  if (!ids.length) throw new CliError("--models is empty.", MODELS_FIX);
-  return ids;
-}
 
 /** Parse repeated `--map <target>:<model>=<targetModel>` into a model_map. */
 function parseMaps(raw: string[] | undefined, into: Record<string, Record<string, string>> = {}): Record<string, Record<string, string>> {
@@ -91,7 +81,7 @@ program
   .name("routearena")
   .description("See what your LLM traffic costs on other providers, from what each provider reports. Your keys stay on your machine.")
   .version(VERSION)
-  .addHelpText("after", `\nExamples:\n  $ npx routearena@latest check --json\n  $ npx routearena@latest init --primary openrouter --free-credits --email you@example.com\n  $ npx routearena@latest start          # then set baseURL to http://localhost:4000/v1\n  $ npx routearena@latest demo --models openai/gpt-4o-mini,deepseek/deepseek-chat\n  $ npx routearena@latest report --publish\n\n${agentProtocol()}`);
+  .addHelpText("after", `\nExamples:\n  $ npx routearena@latest check --json\n  $ npx routearena@latest init --primary openrouter --free-credits --email you@example.com\n  $ npx routearena@latest start          # then set baseURL to http://localhost:4000/v1\n  $ npx routearena@latest report --publish\n\n${agentProtocol()}`);
 
 // ---------- check ----------
 jsonOpt(program.command("check"))
@@ -132,7 +122,7 @@ jsonOpt(program.command("check"))
         config: cfg ? { exists: true, primary: cfg.primary, sample: cfg.sample, port: cfg.port } : { exists: false },
         log_records: fs.existsSync(logPath()) ? fs.readFileSync(logPath(), "utf8").split("\n").filter(Boolean).length : 0,
         ready: { live: primaries.length > 0 && Object.values(targets).some((s) => s !== "no-key") },
-        next: primaryBalance?.empty ? "Your OpenRouter balance is at or below zero. OpenRouter reserves an estimate for every in-flight request and refuses with 402 when the balance cannot cover it, so parallel requests fail first. Add credits at openrouter.ai/settings/credits (or run demo with --concurrency 1), then run check again." : nextStep(primaries, targets, cfg),
+        next: primaryBalance?.empty ? "Your OpenRouter balance is at or below zero. OpenRouter reserves an estimate for every in-flight request and refuses with 402 when the balance cannot cover it, so parallel requests fail first. Add credits at openrouter.ai/settings/credits, then run check again." : nextStep(primaries, targets, cfg),
       };
       out(o, result, () => {
         log(`routearena v${VERSION} · node ${nodeVer}${major < 20 ? " (needs 20+)" : ""}`);
@@ -194,7 +184,7 @@ function nextStep(primaries: string[], targets: Record<string, string>, cfg: Con
   if (!primaries.length) return "Add OPENROUTER_API_KEY or OPENAI_API_KEY to .env, then run check again.";
   if (!Object.values(targets).some((s) => s !== "no-key")) return "No target is reachable. Run: routearena init --primary " + primaries[0] + " --free-credits --email you@example.com  (or add a target key such as GROQ_API_KEY).";
   if (!cfg) return "Run: routearena init --primary " + primaries[0];
-  return "Run: routearena start   (then point baseURL at http://localhost:" + cfg.port + "/v1)  or: routearena demo --models <ids>";
+  return "Run: routearena start   (then point baseURL at http://localhost:" + cfg.port + "/v1)";
 }
 
 // ---------- init ----------
@@ -257,7 +247,7 @@ jsonOpt(program.command("init"))
       out(o, { ok: true, config: cfg, config_path: path.join(configDir(), "config.json"), credits, relay: RELAY_URL }, () => {
         log(`wrote ${path.join(configDir(), "config.json")} (primary ${cfg.primary}, sample ${cfg.sample}${Object.keys(model_map).length ? `, ${Object.values(model_map).reduce((n, m) => n + Object.keys(m).length, 0)} model mappings` : ""})`);
         if (credits.claimed) log(`free TokenRouter credits: ${"budget_usd" in credits ? fmtUsd(credits.budget_usd as number) : "claimed"}${credits.expires_at ? `, expire ${String(credits.expires_at).slice(0, 10)}` : ""}`);
-        log("next: routearena start   or   routearena demo --models <ids>");
+        log("next: routearena start");
       });
     } catch (e) {
       fail(o, e);
@@ -391,72 +381,6 @@ jsonOpt(program.command("stop"))
     }
   });
 
-// ---------- demo ----------
-jsonOpt(program.command("demo"))
-  .description("send a real extraction workload through the proxy with 100% mirroring, then build the report")
-  .requiredOption("--models <ids>", "comma-separated OpenRouter-style model ids to run the workload on (you choose; RouteArena ships no model list)")
-  .option("--requests <n>", "number of workload items to send (default 40, max 101)", (v) => parseInt(v, 10), 40)
-  .option("--port <port>", "proxy port", (v) => parseInt(v, 10))
-  .option("--concurrency <n>", "parallel requests", (v) => parseInt(v, 10), 4)
-  .option("--no-report", "skip building the report afterwards")
-  .addHelpText("after", "\nExample:\n  $ routearena demo --models openai/gpt-4o-mini,deepseek/deepseek-chat --requests 40 --json\n\nThe workload is real web-extraction prompts over real public pages (see demo/README.md); items are assigned to your --models round-robin. Costs are real and are whatever each provider bills you.")
-  .action(async (opts: any) => {
-    const o: Out = { json: !!opts.json };
-    try {
-      loadDotenv();
-      const modelIds = parseModels(opts.models);
-      const cfg = loadConfig() ?? { ...DEFAULT_CONFIG, createdAt: new Date().toISOString() };
-      if (!loadConfig()) {
-        const p = (Object.keys(PRIMARIES) as PrimaryId[]).find((x) => !!process.env[PRIMARIES[x].keyEnv]);
-        if (p) cfg.primary = p;
-        saveConfig(cfg);
-      }
-      const key = process.env[PRIMARIES[cfg.primary].keyEnv];
-      if (!key) throw new CliError(`${PRIMARIES[cfg.primary].keyEnv} is not set.`, "Add it to .env, then run demo again.");
-      const credits = loadCredits();
-      const resolved = resolveTargets({ credits, only: cfg.targets, excludePrimary: cfg.primary }).filter((t) => t.status !== "no-key");
-      if (!resolved.length) throw new CliError("No target is reachable (no target key and no free credits).", "Run: routearena init --free-credits --email you@example.com   or add a target key such as GROQ_API_KEY to .env.");
-      const items = assignModels((await loadWorkload()).slice(0, opts.requests), modelIds);
-      const demoCfg: Config = { ...cfg, sample: 1.0, port: opts.port ?? (cfg.port === 4000 ? 4017 : cfg.port + 17) };
-      const proxy = await startProxy({ config: demoCfg, primaryKey: key, credits, mirrorTimeoutMs: 120_000 });
-      const t0 = Date.now();
-      if (!o.json) log(`sending ${items.length} real extraction requests on ${modelIds.join(", ")} through ${PRIMARIES[cfg.primary].name}, mirroring 100% to ${resolved.map((r) => r.target.id).join(", ")}…`);
-      const run = await runDemo(items, {
-        proxyBase: `http://127.0.0.1:${proxy.port}/v1`,
-        primary: cfg.primary,
-        concurrency: opts.concurrency,
-        onProgress: (d, t, ok) => (!o.json && d % 10 === 0 ? log(`  ${d}/${t} sent (${ok} ok)`) : undefined),
-      });
-      if (!o.json) log(`waiting for ${proxy.engine.pending()} mirrors to finish…`);
-      await proxy.engine.drain(120_000);
-      await proxy.close();
-      const elapsed = Date.now() - t0;
-      let report: any = null;
-      if (opts.report !== false) {
-        if (!o.json) log("building report…");
-        const r = await buildReport({ onProgress: (m) => (!o.json ? log("  " + m) : undefined) });
-        report = { html: r.htmlPath, json: r.jsonPath, records: r.records, summary: await summarize(r.aggregates) };
-      }
-      const stopped = run.stopped
-        ? {
-            ...run.stopped,
-            fix:
-              run.stopped.error_type === "insufficient_credits"
-                ? `${PRIMARIES[cfg.primary].name} kept refusing requests for lack of credits after ${run.credit_retries ?? 0} retries. Add credits (${cfg.primary === "openrouter" ? "openrouter.ai/settings/credits" : "platform.openai.com/settings/organization/billing"}), then run demo again. The report below covers the ${run.ok} pairs that completed.`
-                : `${PRIMARIES[cfg.primary].name} rejected the key (${run.stopped.error_type}). Check ${PRIMARIES[cfg.primary].keyEnv} in .env, then run demo again.`,
-          }
-        : null;
-      const stats: Record<string, unknown> = proxy.engine.stats as any;
-      out(o, { ok: run.ok > 0, models: modelIds, sent: run.sent, primary_ok: run.ok, primary_failed: run.failed, stopped, mirrors: stats, elapsed_ms: elapsed, report }, () => {
-        log(`done in ${(elapsed / 1000).toFixed(0)}s: ${run.ok}/${run.sent} completed on ${PRIMARIES[cfg.primary].name}; mirrors ok ${stats.target_ok ?? 0}, errors ${stats.target_error ?? 0}`);
-        if (stopped) log(`stopped early after ${stopped.after} requests: ${stopped.message}\n  fix: ${stopped.fix}`);
-        if (report) printSummary(report.summary, report.html);
-      });
-    } catch (e) {
-      fail(o, e);
-    }
-  });
-
 // ---------- report ----------
 jsonOpt(program.command("report"))
   .description("aggregate the log into routearena-report/index.html and report.json")
@@ -469,9 +393,9 @@ jsonOpt(program.command("report"))
     const o: Out = { json: !!opts.json };
     try {
       loadDotenv();
-      if (!fs.existsSync(logPath())) throw new CliError("No log found at " + logPath(), "Run routearena start and send traffic through the proxy, or run routearena demo --models <ids>, then report again.");
+      if (!fs.existsSync(logPath())) throw new CliError("No log found at " + logPath(), "Run routearena start and send traffic through the proxy, then report again.");
       const r = await buildReport({ judge: opts.judge !== false, judgeSample: opts.judgeSample, onProgress: (m) => (!o.json ? log(m) : undefined) });
-      if (r.records === 0) throw new CliError("The log has no records yet.", "Send requests through the proxy (baseURL http://localhost:4000/v1) or run routearena demo --models <ids>.");
+      if (r.records === 0) throw new CliError("The log has no records yet.", "Send requests through the proxy (baseURL http://localhost:4000/v1).");
       let published: { url: string; id: string } | null = null;
       if (opts.publish) published = await publishAggregates(r.aggregates);
       const summary = await summarize(r.aggregates);

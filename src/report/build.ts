@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { PRIMARIES, RELAY_URL, REPORT_DIR, loadConfig, loadCredits, logPath, pkgVersion, type Config, type Credits } from "../config.js";
-import { loadWorkload, type WorkloadPrompt } from "../demo/run.js";
-import { readLog, type LogRecord } from "../proxy/logger.js";
+import { readLog } from "../proxy/logger.js";
 import { loadTargets, resolveTargets } from "../targets/index.js";
 import { aggregate, type AggregateInput, type ReportAggregates } from "./aggregate.js";
 import { renderReportHtml } from "./html.js";
@@ -53,81 +52,6 @@ export function pickJudge(cfg: Config, cwd: string): JudgeEndpoint | null {
   return null;
 }
 
-function tryParse(s: string | null | undefined): any | undefined {
-  if (!s) return undefined;
-  try {
-    return JSON.parse(s.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/, ""));
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * The instruction part of a demo user message: everything before the page content. Items carry the bulk after a
- * "JSON-LD:" and/or "PAGE TEXT:" marker, or (pages without JSON-LD) directly after the instruction paragraph, so the
- * first two paragraphs (URL + Fields line, then the instruction) are the stable part. The JSON-LD block is kept only
- * for an exact page match; for a template-level match it and the page URL belong to a different page and are dropped.
- */
-export function stripBulk(user: string, exactPage: boolean): string {
-  let head = user;
-  const pt = head.indexOf("PAGE TEXT:");
-  if (pt >= 0) head = head.slice(0, pt);
-  const jl = head.indexOf("JSON-LD:");
-  if (jl >= 0 && !exactPage) head = head.slice(0, jl);
-  if (jl < 0) head = head.split(/\n\s*\n/).slice(0, 2).join("\n\n");
-  if (!exactPage)
-    head = head
-      .split("\n")
-      .filter((l) => !/^Page URL:/i.test(l))
-      .join("\n");
-  return head.trim();
-}
-
-/**
- * Reconstruct the request for records produced by `routearena demo`. The proxy logs no prompt text by design, so the
- * workload is matched to a record by page (the completion's url equals the item's source_url) or by template (the
- * completion's keys cover at least half of the template's "Fields:" line). Workload items carry no model: the agent
- * assigns models at run time, so every item is a candidate for every record. Returns undefined for records that are
- * not from the demo workload, and the judge falls back to a one-line summary.
- */
-export function demoRequestText(items: WorkloadPrompt[]): (rec: LogRecord) => string | undefined {
-  const fieldsOf = (it: WorkloadPrompt): string[] => {
-    const u = it.messages.find((m) => m.role === "user")?.content ?? "";
-    const m = u.match(/^Fields:\s*(.+)$/m);
-    return m ? m[1].split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
-  };
-  const text = (it: WorkloadPrompt, exactPage: boolean): string => {
-    const sys = it.messages.find((m) => m.role === "system")?.content?.trim();
-    const user = it.messages.find((m) => m.role === "user")?.content ?? "";
-    return [sys ? `SYSTEM: ${sys}` : null, `USER: ${stripBulk(user, exactPage)}`].filter(Boolean).join("\n\n");
-  };
-  const memo = new Map<string, string | undefined>();
-  return (rec) => {
-    if (!items.length) return undefined;
-    const j = tryParse(rec.primary.completion_text);
-    const obj = j && typeof j === "object" && !Array.isArray(j) ? j : undefined;
-    const keys = obj ? Object.keys(obj).map((k) => k.toLowerCase()) : [];
-    const url = obj ? [obj.url, obj.website, obj.source_url].find((v) => typeof v === "string") : undefined;
-    const page = url ? items.find((it) => it.source_url === url || it.source_url.replace(/\/$/, "") === String(url).replace(/\/$/, "")) : undefined;
-    if (page) return text(page, true);
-    if (!keys.length) return undefined;
-    let best: WorkloadPrompt | undefined;
-    let bestScore = 0;
-    for (const it of items) {
-      const f = fieldsOf(it);
-      if (!f.length) continue;
-      const hit = f.filter((x) => keys.includes(x)).length / f.length;
-      if (hit > bestScore) {
-        bestScore = hit;
-        best = it;
-      }
-    }
-    if (!best || bestScore < 0.5) return undefined;
-    const mk = best.template;
-    if (!memo.has(mk)) memo.set(mk, text(best, false));
-    return memo.get(mk);
-  };
-}
 
 // ---------------------------------------------------------------------------------------------
 // Billed costs. TokenRouter does not put a cost on its responses. For a free-credit claim in key mode the relay
@@ -194,9 +118,7 @@ export async function buildReport(opts: BuildOptions = {}): Promise<BuildResult>
     const ep = opts.judgeEndpoint !== undefined ? opts.judgeEndpoint : pickJudge(cfg, cwd);
     judgeLabel = ep?.label ?? null;
     say(ep ? `judging a ${Math.round(fraction * 100)}% sample with ${ep.label}` : "no judge model available; exact-match only");
-    const workload = await loadWorkload().catch(() => [] as WorkloadPrompt[]);
-    const requestText = workload.length ? demoRequestText(workload) : undefined;
-    judgements = await judgeAll(records, { cwd, endpoint: ep, fraction, requestText, onProgress: (d, t) => say(`judged ${d}/${t}`) });
+    judgements = await judgeAll(records, { cwd, endpoint: ep, fraction, onProgress: (d, t) => say(`judged ${d}/${t}`) });
   }
 
   const targets = loadTargets();

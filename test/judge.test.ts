@@ -3,9 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { PRIMARIES } from "../src/config.js";
-import { loadWorkload } from "../src/demo/run.js";
 import type { LogRecord, SideResult } from "../src/proxy/logger.js";
-import { demoRequestText, pickJudge, stripBulk } from "../src/report/build.js";
+import { pickJudge } from "../src/report/build.js";
 import { abOrder, compareSides, exactCompare, inSample, isReasoningLeak, judgeAll, jsonSimilarity, normalizeText } from "../src/report/judge.js";
 import { startMockUpstream, tmpCwd } from "./helpers.js";
 
@@ -217,28 +216,3 @@ test("pickJudge prefers the primary when its key exists, else a target", () => {
   }
 });
 
-test("demo request text: system prompt plus instruction, bulk page content stripped", async () => {
-  const items = await loadWorkload();
-  const hook = demoRequestText(items);
-  // exact page match by url -> keeps the Page URL line and JSON-LD, drops PAGE TEXT
-  const exact = hook(rec("d-1", '{"url":"https://en.wikipedia.org/wiki/Web_scraping","title":"Web scraping","authors":[],"publishedAt":"2005-09-17T18:57:30Z","text":"...","excerpt":"...","wordCount":1,"readingTimeMinutes":1,"tags":null,"image":null,"headings":[]}', "{}"));
-  assert.ok(exact, "matched");
-  assert.ok(exact!.startsWith("SYSTEM: You are the extraction step"));
-  assert.ok(exact!.includes("Page URL: https://en.wikipedia.org/wiki/Web_scraping"));
-  assert.ok(exact!.includes("Fields: url, title, authors, publishedAt, text, excerpt, wordCount, readingTimeMinutes, tags, image, headings"));
-  assert.ok(exact!.includes("JSON-LD:"));
-  assert.ok(!exact!.includes("PAGE TEXT:") && !exact!.includes("Skip to content"));
-  assert.ok(exact!.length < 3000, `short enough: ${exact!.length}`);
-  // template match by field names (a different page of the same template) -> no page-specific lines
-  const tmpl = hook(rec("d-2", '{"url":"https://example.org/other","title":"x","authors":[],"publishedAt":null,"text":"","excerpt":"","wordCount":null,"readingTimeMinutes":null,"tags":[],"image":null,"headings":[]}', "{}", "qwen/qwen3.8-flash"));
-  assert.ok(tmpl, "matched by template");
-  assert.ok(tmpl!.includes("Fields: url, title, authors") && tmpl!.includes("Extract the main article"));
-  assert.ok(!tmpl!.includes("Page URL:") && !tmpl!.includes("JSON-LD:"));
-  // not from the demo -> undefined, so the judge gets the summary line
-  assert.equal(hook(rec("d-3", '{"a":1,"b":2}', "{}")), undefined);
-  assert.equal(hook(rec("d-4", "plain prose answer", "other", "anthropic/claude-sonnet-5.5")), undefined);
-  // items without markers keep only the first two paragraphs
-  const noMarker = items.find((it) => !it.messages[1].content.includes("PAGE TEXT:"))!;
-  const s = stripBulk(noMarker.messages[1].content, false);
-  assert.ok(s.includes("Fields:") && s.split(/\n\s*\n/).length <= 2 && s.length < 1500, s);
-});

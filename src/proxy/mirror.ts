@@ -236,7 +236,7 @@ export class MirrorEngine {
     return this.inflight.size;
   }
 
-  /** Wait for all in-flight mirrors (used by `demo` and graceful shutdown). */
+  /** Wait for all in-flight mirrors (graceful shutdown). */
   async drain(timeoutMs = 90_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (this.inflight.size > 0 && Date.now() < deadline) {

@@ -196,7 +196,7 @@ export interface CallOptions {
 }
 
 /**
- * Send one chat completion and collect the result. Used for mirrors, the judge, and the demo sender.
+ * Send one chat completion and collect the result. Used for mirrors and the judge.
  * Never retries. Never throws for HTTP errors; returns status: "error" with a type instead.
  */
 export async function chatCompletion(opts: CallOptions): Promise<CallResult> {

@@ -345,7 +345,7 @@ export interface JudgeOptions {
   endpoint: JudgeEndpoint | null;
   /**
    * The request as the judge should see it (system prompt + instruction, bulk content stripped). The log does not
-   * store prompts, so the caller reconstructs it where it can (the demo workload). Return undefined to fall back to
+   * store prompts, so a caller that still has the prompt can supply it. Return undefined to fall back to
    * a one-line summary.
    */
   requestText?: (rec: LogRecord) => string | undefined;

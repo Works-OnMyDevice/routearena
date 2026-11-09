@@ -1,6 +1,6 @@
 {
   "name": "routearena",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "See what your LLM traffic would cost on other providers. Your keys stay on your machine.",
   "license": "MIT",
   "type": "module",
@@ -10,7 +10,6 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "demo/workload.jsonl",
     "AGENTS.md",
     "README.md",
     "LICENSE"
@@ -24,7 +23,9 @@
     "test": "node --import tsx --test test/*.test.ts",
     "lint": "eslint src test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "repository": {
     "type": "git",
@@ -48,11 +49,12 @@
     "commander": "^12.1.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
     "@eslint/js": "^9.9.0",
+    "@types/node": "^20.14.0",
     "eslint": "^9.9.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "wrangler": "^4.158.0"
   }
 }

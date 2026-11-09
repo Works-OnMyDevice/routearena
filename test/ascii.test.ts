@@ -27,7 +27,7 @@ test("ascii picture never truncates at common widths, with and without a reporte
         const lines = out.split("\n");
         assert.ok(!out.includes("…"), `no truncation at width ${width} ascii=${ascii}:\n${out}`);
         assert.ok(lines.every((l) => l.length === lines[0].length), `every line is ${lines[0].length} wide at width ${width}`);
-        assert.ok(out.includes("the hedgehog mirrors it"), "mascot present");
+        assert.ok(out.includes("mirrors your traffic"), "mascot present");
       }
     }
   }
