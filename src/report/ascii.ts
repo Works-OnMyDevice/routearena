@@ -82,13 +82,13 @@ const pct = (n: number | null | undefined): string => (n === null || n === undef
 
 /** The mascot: a hedgehog, 5 lines, 24 columns. It sits at the right of the flow diagram and never changes size. */
 const HEDGEHOG = [
-  "       ,;;;;;;;;;;;,    ",
-  "    .-';;;;;;;;;;;;;'.  ",
-  "   ( o ;;;;;;;;;;;;;;; )",
-  "    `-'`\"\"\"\"\"\"\"\"\"\"\"\"`-'",
-  "   mirrors your traffic ",
+  "      ,;;;;;;;;;;,    ",
+  "   .-';;;;;;;;;;;;'.  ",
+  "  ( o ;;;;;;;;;;;;;; )",
+  "   `-'`\"\"\"\"\"\"\"\"\"\"\"`-'",
+  " mirrors your traffic ",
 ];
-const HEDGEHOG_W = 24;
+const HEDGEHOG_W = 22;
 
 export function renderAsciiComparison(a: AsciiInput, opts: AsciiOptions = {}): string {
   const W = Math.max(76, Math.min(120, opts.width ?? 80));
