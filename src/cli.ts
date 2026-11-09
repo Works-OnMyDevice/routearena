@@ -189,13 +189,13 @@ function nextStep(primaries: string[], targets: Record<string, string>, cfg: Con
 
 // ---------- init ----------
 jsonOpt(program.command("init"))
-  .description("write .routearena/config.json; optionally claim free mirror credits on an alternative router")
+  .description("write .routearena/config.json; optionally claim free mirror credits on some alternative routers")
   .addOption(new Option("--primary <provider>", "openrouter or openai").choices(["openrouter", "openai"]))
   .option("--sample <fraction>", "fraction of eligible requests to mirror (0..1)", parseFloat)
   .option("--port <port>", "proxy port", (v) => parseInt(v, 10))
   .option("--targets <ids>", "comma-separated target ids to mirror to (default: every target with a key or credits)")
   .option("--map <spec>", "send <model> to <target> as <targetModel>: --map <target>:<model>=<targetModel> (repeatable; default: the same id)", (v: string, acc: string[]) => [...acc, v], [] as string[])
-  .option("--free-credits", "claim $1 of free mirror credits on an alternative router (needs --email)")
+  .option("--free-credits", "claim $1 of free mirror credits on some alternative routers (needs --email)")
   .option("--email <email>", "email for the free-credits magic link")
   .option("--no-credits", "skip free credits")
   .option("--resume <claimId>", "resume waiting on a claim you already started")

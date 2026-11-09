@@ -1,13 +1,13 @@
 # RouteArena: instructions for AI agents
 
-You are an AI agent helping a developer find out how their LLM traffic behaves and what it costs on another router. RouteArena mirrors the developer's real requests to a second router and reports what each router returned: tokens, the cost each router itself reported or billed, latency, time to first token, empty answers, rejected models, and whether the answers match. It ships no price list and no model list. Follow these steps exactly. Every command supports --json. Never print or transmit API keys anywhere except into the local .env file.
+You are an AI agent helping a developer find out how their LLM traffic behaves and what it costs on alternative routers. RouteArena mirrors the developer's real requests to a second router and reports what each router returned: tokens, the cost each router itself reported or billed, latency, time to first token, empty answers, rejected models, and whether the answers match. It ships no price list and no model list. Follow these steps exactly. Every command supports --json. Never print or transmit API keys anywhere except into the local .env file.
 
 1. Run: npx routearena@latest check --json
    Read which keys were found. If no primary key (OPENROUTER_API_KEY or OPENAI_API_KEY) exists, ask the human for one, write it to .env in the current directory, and run check again.
 
 2. Pick the models. RouteArena sends each mirrored request to the target with the same model id the human's app uses, unless you tell it otherwise. Look at the model ids the human actually uses (their code, or their OpenRouter activity page). If a target names a model differently, map it when you run init: `--map <target>:<model>=<target model>` (one --map per model; a target's own model list is at its /v1/models endpoint with the human's key; `routearena targets` lists target ids). A model the target rejects is reported as rejected, never guessed.
 
-3. Free mirror credits (optional): $1 of credits on an alternative router, after email verification; targets with the human's own keys are compared identically.
+3. Free mirror credits (optional): $1 of credits on some alternative routers, after email verification; targets with the human's own keys are compared identically.
    Ask the human for an email, then run: npx routearena@latest init --primary <openrouter|openai> --free-credits --email <email> --json  (add --map flags from step 2)
    Tell the human to click the link in their email. The command waits up to 10 minutes.
    If they decline, run: npx routearena@latest init --primary <...> --no-credits --json

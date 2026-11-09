@@ -4,7 +4,7 @@ See how your LLM traffic behaves on alternative routers. Your keys stay on your 
 
 RouteArena is a CLI and a local proxy. It takes your real OpenAI-compatible traffic (OpenRouter or OpenAI as the primary), mirrors a sample of it to alternative routers and providers, and writes a report from what each router itself returned: tokens, the cost each router reported or billed, latency, time to first token, empty answers, rejected models, and whether the two answers match. It ships no price list and no model list.
 
-Add a key for any supported router, or claim $1 of free credits on an alternative router inside the tool.
+Add a key for any supported router, or claim $1 of free credits on some alternative routers inside the tool.
 
 ```sh
 npx routearena@latest check                 # finds keys in env / .env
@@ -32,9 +32,9 @@ Every command supports `--json`, errors carry a `fix` field, and nothing prompts
 
 **Cost.** RouteArena computes no prices. A router that reports a cost on its responses has that cost shown. A router that does not has its token counts shown per model and side (prompt, completion, reasoning, cached), and the dollars are left to you; with free credits the billed amounts are filled in for you.
 
-**Privacy.** Your primary key goes only to your primary. Router keys go only to their router. Mirrored prompts go to the alternative router (that is the point) and nowhere else. The log stays on your machine. `report --publish` uploads aggregates only; anything that looks like a prompt or completion is rejected before it leaves.
+**Privacy.** Your primary key goes only to your primary. Router keys go only to their router. Mirrored prompts go to the alternative routers you chose (that is the point) and nowhere else. The log stays on your machine. `report --publish` uploads aggregates only; anything that looks like a prompt or completion is rejected before it leaves.
 
-**Free credits.** `init --free-credits --email you@example.com` verifies your email and gives you $1 of mirror credits on an alternative router, capped by that router itself. One claim per email. If none are available you can use your own key instead.
+**Free credits.** `init --free-credits --email you@example.com` verifies your email and gives you $1 of mirror credits on some alternative routers, capped by the routers themselves. One claim per email. If none are available you can use your own key instead.
 
 ## What the report shows
 
