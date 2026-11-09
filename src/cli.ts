@@ -189,13 +189,13 @@ function nextStep(primaries: string[], targets: Record<string, string>, cfg: Con
 
 // ---------- init ----------
 jsonOpt(program.command("init"))
-  .description("write .routearena/config.json; optionally claim free TokenRouter mirror credits")
+  .description("write .routearena/config.json; optionally claim free mirror credits on an alternative router")
   .addOption(new Option("--primary <provider>", "openrouter or openai").choices(["openrouter", "openai"]))
   .option("--sample <fraction>", "fraction of eligible requests to mirror (0..1)", parseFloat)
   .option("--port <port>", "proxy port", (v) => parseInt(v, 10))
   .option("--targets <ids>", "comma-separated target ids to mirror to (default: every target with a key or credits)")
   .option("--map <spec>", "send <model> to <target> as <targetModel>: --map <target>:<model>=<targetModel> (repeatable; default: the same id)", (v: string, acc: string[]) => [...acc, v], [] as string[])
-  .option("--free-credits", "claim $1 of free TokenRouter mirror credits (needs --email)")
+  .option("--free-credits", "claim $1 of free mirror credits on an alternative router (needs --email)")
   .option("--email <email>", "email for the free-credits magic link")
   .option("--no-credits", "skip free credits")
   .option("--resume <claimId>", "resume waiting on a claim you already started")
@@ -246,7 +246,7 @@ jsonOpt(program.command("init"))
       }
       out(o, { ok: true, config: cfg, config_path: path.join(configDir(), "config.json"), credits, relay: RELAY_URL }, () => {
         log(`wrote ${path.join(configDir(), "config.json")} (primary ${cfg.primary}, sample ${cfg.sample}${Object.keys(model_map).length ? `, ${Object.values(model_map).reduce((n, m) => n + Object.keys(m).length, 0)} model mappings` : ""})`);
-        if (credits.claimed) log(`free TokenRouter credits: ${"budget_usd" in credits ? fmtUsd(credits.budget_usd as number) : "claimed"}${credits.expires_at ? `, expire ${String(credits.expires_at).slice(0, 10)}` : ""}`);
+        if (credits.claimed) log(`free credits: ${"budget_usd" in credits ? fmtUsd(credits.budget_usd as number) : "claimed"}${credits.expires_at ? `, expire ${String(credits.expires_at).slice(0, 10)}` : ""}`);
         log("next: routearena start");
       });
     } catch (e) {
@@ -388,7 +388,7 @@ jsonOpt(program.command("report"))
   .option("--no-judge", "skip agreement judging")
   .option("--judge-sample <fraction>", "fraction of pairs to judge for agreement (default 0.25; 1 judges every pair)", parseFloat)
   .option("--open", "open the HTML report in your browser")
-  .addHelpText("after", "\nExamples:\n  $ routearena report\n  $ routearena report --publish --json\n\nCosts are what each provider reported or billed. TokenRouter reports none per response: with free credits the relay fills in TokenRouter's billed amounts; with your own TokenRouter key the report shows token counts and leaves dollars to you.")
+  .addHelpText("after", "\nExamples:\n  $ routearena report\n  $ routearena report --publish --json\n\nCosts are what each provider reported or billed. A router that reports no cost per response is shown with its token counts, and with free credits its billed amounts are filled in. RouteArena computes no prices.")
   .action(async (opts: any) => {
     const o: Out = { json: !!opts.json };
     try {
@@ -525,7 +525,7 @@ function printSummary(s: Awaited<ReturnType<typeof summarize>>, htmlPath: string
 
 // ---------- credits ----------
 jsonOpt(program.command("credits"))
-  .description("show remaining free TokenRouter credit budget and expiry")
+  .description("show remaining free-credit budget and expiry")
   .action(async (o: Out) => {
     try {
       const c = loadCredits();
@@ -534,7 +534,7 @@ jsonOpt(program.command("credits"))
         return;
       }
       const b = await fetchBalance(c);
-      out(o, { claimed: true, ...b }, () => log(`free TokenRouter credits: ${fmtUsd(b.remaining_usd)} of ${fmtUsd(b.budget_usd)} left, ${b.requests} requests, expires ${b.expires_at.slice(0, 10)}`));
+      out(o, { claimed: true, ...b }, () => log(`free credits: ${fmtUsd(b.remaining_usd)} of ${fmtUsd(b.budget_usd)} left, ${b.requests} requests, expires ${b.expires_at.slice(0, 10)}`));
     } catch (e) {
       fail(o, e);
     }

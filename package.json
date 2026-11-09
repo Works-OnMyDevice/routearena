@@ -1,6 +1,6 @@
 {
   "name": "routearena",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "See what your LLM traffic would cost on other providers. Your keys stay on your machine.",
   "license": "MIT",
   "type": "module",

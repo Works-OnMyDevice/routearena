@@ -78,7 +78,7 @@ export interface ClaimUsage {
 
 /** Shown when TokenRouter pairs carry no cost. */
 export const TOKENROUTER_COST_NOTE =
-  "TokenRouter does not report cost per response; with your own TokenRouter key RouteArena shows token counts and leaves dollars to you (take the counts to TokenRouter's current pricing page); with free credits the relay fills in TokenRouter's billed amounts.";
+  "This router does not report a cost per response. With your own key the report shows token counts and leaves dollars to you (take the counts to the router's current pricing page); with free credits the relay fills in the billed amounts.";
 
 /**
  * TokenRouter's bills for a key-mode free-credit claim, as the relay reports them: `GET {relay}/api/claim/usage` with
@@ -131,10 +131,10 @@ export async function buildReport(opts: BuildOptions = {}): Promise<BuildResult>
   else if (records.some((r) => r.targets.some((s) => s.provider === "tokenrouter"))) {
     const credits = loadCredits(cwd);
     if (credits?.mode === "key") {
-      say("reading TokenRouter's bills for the free-credit key from the relay");
+      say("reading the billed amounts for the free-credit key from the relay");
       const rows = await fetchBilledCosts(credits, { fetchImpl: opts.fetchImpl, relayUrl: opts.relayUrl });
       if (rows) billed = { tokenrouter: rows };
-      else say("relay did not return TokenRouter bills; TokenRouter costs stay not reported");
+      else say("relay returned no bills; that router's costs stay not reported");
     }
   }
 
