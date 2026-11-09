@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PrimaryId } from "../config.js";
 import type { ResolvedTarget } from "../targets/index.js";
-import { computeCost, mapModel } from "../targets/mapping.js";
+import { mapModel, type ModelMap } from "../targets/mapping.js";
 import { DEFAULT_TIMEOUT_MS } from "./forward.js";
 import type { Logger, LogRecord, SideResult } from "./logger.js";
 import { chatCompletion, estimateInputTokens, hasImageContent, toSideResult } from "./openaiCall.js";
@@ -15,6 +15,11 @@ export interface MirrorOptions {
   mirrorImages: boolean;
   /** Per-mirror timeout. Defaults to the primary's timeout (DEFAULT_TIMEOUT_MS) so both sides fail on equal terms. */
   timeoutMs?: number;
+  /**
+   * Per-target model overrides from Config.model_map (set by the user's agent). Without an entry the mirror
+   * receives the model id the client sent. RouteArena ships no mappings.
+   */
+  modelMap?: ModelMap;
   /** Injected for tests. */
   random?: () => number;
 }
@@ -99,7 +104,7 @@ export class MirrorEngine {
   private logger: Logger;
   private hourWindow: number[] = []; // timestamps of mirrored requests
   private inflight = new Set<Promise<void>>();
-  stats = { requests: 0, mirrored: 0, skipped: 0, target_ok: 0, target_error: 0, unmapped: 0 };
+  stats = { requests: 0, mirrored: 0, skipped: 0, target_ok: 0, target_error: 0 };
 
   constructor(opts: MirrorOptions, logger: Logger) {
     this.opts = opts;
@@ -186,12 +191,11 @@ export class MirrorEngine {
   }
 
   private async mirrorOne(rt: ResolvedTarget, canonical: string, body: Record<string, any>): Promise<SideResult> {
-    const mapped = mapModel(rt.target, canonical);
-    if (!mapped) {
-      this.stats.unmapped++;
-      return { provider: rt.target.id, model: canonical, status: "unmapped", via: viaOf(rt) };
-    }
-    const mirrorBody: Record<string, any> = { ...body, model: mapped.entry.id };
+    // Every request is sent. Model choice on a target belongs to the user's agent (Config.model_map); by default the
+    // target gets the id the client sent. A target that does not know the model answers with an error we record.
+    const original = typeof body.model === "string" ? body.model : canonical;
+    const model = mapModel(rt.target, canonical, this.opts.modelMap, original);
+    const mirrorBody: Record<string, any> = { ...body, model };
     // Fields that are OpenRouter-specific and would 400 elsewhere.
     delete mirrorBody.usage;
     delete mirrorBody.provider;
@@ -215,19 +219,14 @@ export class MirrorEngine {
       timeoutMs: this.opts.timeoutMs ?? DEFAULT_MIRROR_TIMEOUT_MS,
       streamForTtft: true,
     });
-    const side = toSideResult(rt.target.id, mapped.entry.id, r, {
+    // cost_usd / cost_source come from chatCompletion: the provider's own usage.cost or "not_reported". Never computed.
+    const side = toSideResult(rt.target.id, model, r, {
       via: viaOf(rt),
       stream: true,
     });
-    if (r.usage) {
-      side.cost_usd = computeCost(mapped.entry, r.usage);
-      side.cost_source = "computed";
-      if (typeof r.usage.cost === "number") side.reported_cost_usd = r.usage.cost;
-    } else {
-      // 200 without usage is unpriced, not free.
-      side.cost_source = "unknown";
-      side.cost_usd = null;
-    }
+    const idHeader = rt.target.requestIdHeader?.toLowerCase();
+    const requestId = idHeader ? r.response_headers?.[idHeader] : undefined;
+    if (requestId) side.target_request_id = requestId;
     if (r.status === "ok") this.stats.target_ok++;
     else this.stats.target_error++;
     return stripCompletionIfHuge(side);

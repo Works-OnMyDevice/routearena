@@ -10,31 +10,7 @@ export async function sha256(s: string): Promise<string> {
   return hex(await crypto.subtle.digest("SHA-256", te.encode(s)));
 }
 
-async function hmacKey(): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", te.encode(env.hmacSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-}
-
 export const randomId = (bytes = 12): string => hex(crypto.getRandomValues(new Uint8Array(bytes)));
-
-/** Relay tokens look like ra_<claimId>.<expUnix>.<hmac32hex>. Prefix keeps leak-greps simple. */
-export async function signToken(claimId: string, expUnix: number): Promise<string> {
-  const payload = `${claimId}.${expUnix}`;
-  const sig = hex(await crypto.subtle.sign("HMAC", await hmacKey(), te.encode(payload))).slice(0, 32);
-  return `ra_${payload}.${sig}`;
-}
-
-export async function verifyToken(token: string): Promise<{ claimId: string; exp: number } | null> {
-  const m = token.match(/^ra_([a-f0-9]{24})\.(\d+)\.([a-f0-9]{32})$/);
-  if (!m) return null;
-  const [, claimId, expStr, sig] = m;
-  const expected = hex(await crypto.subtle.sign("HMAC", await hmacKey(), te.encode(`${claimId}.${expStr}`))).slice(0, 32);
-  let diff = 0;
-  for (let i = 0; i < 32; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
-  if (diff !== 0) return null;
-  const exp = Number(expStr);
-  if (exp * 1000 < Date.now()) return null;
-  return { claimId, exp };
-}
 
 // ---------- sealing (AES-256-GCM, key derived from HMAC_SECRET) ----------
 async function sealKey(): Promise<CryptoKey> {

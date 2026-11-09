@@ -2,12 +2,11 @@ import { emailsGet, expireSweep, logGet, poolGet, poolPost, statsGet } from "../
 import { GET as balance } from "../api/balance";
 import { POST as claim } from "../api/claim";
 import { GET as claimStatus } from "../api/claim/status";
+import { GET as claimUsage } from "../api/claim/usage";
 import { GET as index } from "../api/index";
 import { GET as llms } from "../api/llms";
 import { POST as publish } from "../api/publish";
 import { GET as report } from "../api/r";
-import { POST as chat } from "../api/v1/chat/completions";
-import { GET as models } from "../api/v1/models";
 import { GET as verify } from "../api/verify";
 import { json, setEnv } from "../lib/env";
 import { runWithState } from "../lib/store";
@@ -43,11 +42,10 @@ async function route(req: Request): Promise<Response> {
       if (path === "/llms.txt" && m === "GET") return llms();
       if (path === "/api/claim" && m === "POST") return claim(req);
       if (path === "/api/claim/status" && m === "GET") return claimStatus(req);
+      if (path === "/api/claim/usage" && m === "GET") return claimUsage(req);
       if (path === "/api/verify" && m === "GET") return verify(req);
       if (path === "/api/balance" && m === "GET") return balance(req);
       if (path === "/api/publish" && m === "POST") return publish(req);
-      if (path === "/v1/chat/completions" && m === "POST") return chat(req);
-      if (path === "/v1/models" && m === "GET") return models();
       const r = path.match(/^\/r\/([a-f0-9]{16})$/);
       if (r && m === "GET") {
         url.searchParams.set("id", r[1]);

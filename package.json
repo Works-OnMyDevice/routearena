@@ -1,13 +1,23 @@
 {
   "name": "routearena",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "See what your LLM traffic would cost on other providers. Your keys stay on your machine.",
   "license": "MIT",
   "type": "module",
-  "bin": { "routearena": "dist/cli.js" },
+  "bin": {
+    "routearena": "dist/cli.js"
+  },
   "main": "dist/index.js",
-  "files": ["dist", "targets", "demo/workload.jsonl", "AGENTS.md", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist",
+    "demo/workload.jsonl",
+    "AGENTS.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
     "dev": "tsx src/cli.ts",
@@ -16,9 +26,24 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },
-  "repository": { "type": "git", "url": "git+https://github.com/Works-OnMyDevice/routearena.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Works-OnMyDevice/routearena.git"
+  },
   "homepage": "https://github.com/Works-OnMyDevice/routearena#readme",
-  "keywords": ["llm", "openrouter", "openai", "cost", "proxy", "router", "tokenrouter", "groq", "together", "deepinfra", "fireworks"],
+  "keywords": [
+    "llm",
+    "openrouter",
+    "openai",
+    "cost",
+    "proxy",
+    "router",
+    "tokenrouter",
+    "groq",
+    "together",
+    "deepinfra",
+    "fireworks"
+  ],
   "dependencies": {
     "commander": "^12.1.0"
   },

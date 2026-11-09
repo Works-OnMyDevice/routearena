@@ -86,3 +86,49 @@ test("chatCompletion: a timeout is error_type timeout with elapsed latency", asy
     await slow.close();
   }
 });
+
+test("chatCompletion: cost is only what the provider reports; response headers are exposed", async () => {
+  const reporting = await startMockUpstream({ reply: () => ({ text: "a", usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.00042 }, headers: { "x-tokenrouter-request-id": "req-123" } }) });
+  const silent = await startMockUpstream({ reply: () => ({ text: "a", usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }) });
+  const noUsage = await startMockUpstream({ reply: () => ({ text: "a", usage: null }) });
+  try {
+    const body = { model: "m", messages: [{ role: "user", content: "x" }] };
+    for (const streamForTtft of [true, false]) {
+      const r = await chatCompletion({ baseUrl: reporting.url, auth: "k", body, timeoutMs: 5000, streamForTtft });
+      assert.equal(r.status, "ok");
+      assert.equal(r.cost_usd, 0.00042, `stream=${streamForTtft}: reported cost taken as-is`);
+      assert.equal(r.cost_source, "reported");
+      assert.equal(r.response_headers?.["x-tokenrouter-request-id"], "req-123", `stream=${streamForTtft}: header exposed`);
+
+      const s = await chatCompletion({ baseUrl: silent.url, auth: "k", body, timeoutMs: 5000, streamForTtft });
+      assert.equal(s.status, "ok");
+      assert.strictEqual(s.cost_usd, null, `stream=${streamForTtft}: tokens are never priced by RouteArena`);
+      assert.equal(s.cost_source, "not_reported");
+      assert.equal(s.response_headers?.["x-tokenrouter-request-id"], undefined);
+
+      const n = await chatCompletion({ baseUrl: noUsage.url, auth: "k", body, timeoutMs: 5000, streamForTtft });
+      assert.equal(n.status, "ok");
+      assert.equal(n.usage, null);
+      assert.strictEqual(n.cost_usd, null);
+      assert.equal(n.cost_source, "not_reported");
+    }
+  } finally {
+    await reporting.close();
+    await silent.close();
+    await noUsage.close();
+  }
+});
+
+test("chatCompletion: HTTP errors carry not_reported cost and the response headers", async () => {
+  const up = await startMockUpstream({ reply: () => ({ status: 404, headers: { "x-tokenrouter-request-id": "req-err" } }) });
+  try {
+    const r = await chatCompletion({ baseUrl: up.url, auth: "k", body: { model: "m", messages: [{ role: "user", content: "x" }] }, timeoutMs: 5000, streamForTtft: true });
+    assert.equal(r.status, "error");
+    assert.equal(r.error_type, "model_not_found");
+    assert.strictEqual(r.cost_usd, null);
+    assert.equal(r.cost_source, "not_reported");
+    assert.equal(r.response_headers?.["x-tokenrouter-request-id"], "req-err");
+  } finally {
+    await up.close();
+  }
+});

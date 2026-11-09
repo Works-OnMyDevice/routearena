@@ -28,10 +28,10 @@ export async function poolPost(req: Request): Promise<Response> {
   return json({ added: items.length, available });
 }
 
-/** GET /api/admin/stats -> counters for the findings doc. */
+/** GET /api/admin/stats -> counters (claims, verified, published, pool_available, pool_issued) plus the active config. */
 export async function statsGet(req: Request): Promise<Response> {
   if (!authed(req)) return json({ error: "unauthorized" }, 401);
-  return json({ ...(await stats()), claims_enabled: env.claimsEnabled, relay_enabled: env.relayEnabled, global_cap_usd: env.globalCapUsd, per_claim_usd: env.perClaimUsd });
+  return json({ ...(await stats()), claims_enabled: env.claimsEnabled, max_issued_keys: env.maxIssuedKeys, per_claim_usd: env.perClaimUsd });
 }
 
 /**

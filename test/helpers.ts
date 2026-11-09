@@ -22,6 +22,8 @@ export interface MockReply {
   finishReason?: string;
   /** Streaming only: emit an OpenRouter-style in-stream error chunk (HTTP status stays 200) instead of content. */
   errorChunk?: { code?: number | string; message: string };
+  /** Extra response headers (e.g. a provider request id header). */
+  headers?: Record<string, string>;
 }
 
 export interface MockUpstreamOptions {
@@ -53,7 +55,7 @@ export async function startMockUpstream(opts: Partial<MockUpstreamOptions> = {})
     const r = opts.reply?.(body, req.headers) ?? {};
     if (r.delayMs) await new Promise((x) => setTimeout(x, r.delayMs));
     if (r.status && r.status >= 400) {
-      res.writeHead(r.status, { "content-type": "application/json" });
+      res.writeHead(r.status, { "content-type": "application/json", ...(r.headers ?? {}) });
       res.end(JSON.stringify({ error: { message: `mock error ${r.status}`, type: "mock" } }));
       return;
     }
@@ -62,7 +64,7 @@ export async function startMockUpstream(opts: Partial<MockUpstreamOptions> = {})
     const id = r.id ?? "chatcmpl-mock";
     const finish = r.finishReason ?? (r.toolCalls ? "tool_calls" : "stop");
     if (body.stream) {
-      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-mock": "stream" });
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-mock": "stream", ...(r.headers ?? {}) });
       const send = (o: any) => res.write(`data: ${JSON.stringify(o)}\n\n`);
       const pause = (ms: number) => new Promise((x) => setTimeout(x, ms));
       if (r.comment) {
@@ -93,7 +95,7 @@ export async function startMockUpstream(opts: Partial<MockUpstreamOptions> = {})
       res.end();
       return;
     }
-    res.writeHead(200, { "content-type": "application/json", "x-mock": "json" });
+    res.writeHead(200, { "content-type": "application/json", "x-mock": "json", ...(r.headers ?? {}) });
     res.end(
       JSON.stringify({
         id,

@@ -2,6 +2,13 @@
 type SideResult = Record<string, unknown>;
 export interface TokenTotals { prompt_tokens: number; completion_tokens: number; cached_tokens: number; reasoning_tokens: number }
 
+/**
+ * Aggregation rules. RouteArena computes no prices and ships none: every cost figure here is a number a provider
+ * reported for a request (usage.cost on the response) or billed for it (TokenRouter's own bill for a free-credit
+ * key, read by the relay and joined to the pair by request id). A side without a reported or billed cost is counted
+ * as `cost_not_reported` and stays in latency, error, token and agreement figures but never enters a cost total.
+ */
+
 export interface Quantiles {
   p50: number | null;
   p95: number | null;
@@ -10,7 +17,7 @@ export interface Quantiles {
 
 
 /**
- * Fields the proxy logger is adding to each side. Older logs lack them, so every reader here treats them as optional
+ * Fields the proxy logger adds to each side. Older logs lack them, so every reader here treats them as optional
  * and falls back to the legacy fields (`ttft_ms` + `ttft_method`, `finish_reason` + `completion_text`).
  */
 export type SideExt = SideResult & {
@@ -18,6 +25,8 @@ export type SideExt = SideResult & {
   ttft_first_content_ms?: number;
   empty_output?: boolean;
   response_id?: string;
+  /** The provider's own id for this request (from its request-id header), used to join billing rows to pairs. */
+  target_request_id?: string;
 };
 
 /** Label for the TTFT measurement a pair was compared on. */
@@ -28,8 +37,11 @@ export interface PerSide<T> {
   target: T;
 }
 
+/** Where a cost figure came from. "reported": the provider put it on the response. "billed": the provider's own bill for the request (TokenRouter's, for a free-credit key, read by the relay), joined by request id. */
+export type CostOrigin = "reported" | "billed";
+
 export interface CostSplit {
-  /** Pairs that entered these totals. */
+  /** Pairs that entered these totals: both sides returned ok and both sides have a provider-reported cost. */
   pairs: number;
   primary_cost_usd: number;
   target_cost_usd: number;
@@ -46,28 +58,21 @@ export interface TargetModelStats {
   errors: number;
   error_rate: number | null;
   error_types: Record<string, number>;
-  unmapped: number;
   /** Status ok but no content and no tool calls (usually the token cap was spent on reasoning). Counted over pairs. */
   no_output: PerSide<number>;
-  /** Target sides with status ok but no cost (model not in the price table). Excluded from every cost figure, kept for latency and errors. */
-  unpriced: number;
-  /** Primary sides with status ok but no cost. Excluded from cost figures the same way. */
-  unpriced_primary: number;
-  /** Pairs that entered the as-served cost totals: both sides ok and both sides priced. */
+  /** Paired sides with status ok and no provider-reported cost. Excluded from every cost figure, kept for latency, errors, tokens and agreement. */
+  cost_not_reported: PerSide<number>;
+  /** Pairs that entered the cost totals: both sides ok and both sides reported a cost. */
   cost_pairs: number;
-  /** As-served cost over `cost_pairs`: what each side actually charged (or would charge, from its price table) for its own response. */
+  /** Sum of what each provider reported for its own response over `cost_pairs`. */
   primary_cost_usd: number;
   target_cost_usd: number;
   delta_pct: number | null;
-  /** Target cost with the target's cached tokens re-priced at its full input rate. null when the target's price table has no entry for this model. */
-  target_cost_cache_neutral_usd: number | null;
-  delta_pct_cache_neutral: number | null;
-  /** Target price table applied to the PRIMARY's token counts (same prompt, completion and cached tokens). Isolates price from output volume. */
-  target_cost_price_only_usd: number | null;
-  delta_pct_price_only: number | null;
-  /** As-served cost restricted to pairs where both sides finished normally (stop / tool_calls) and neither was empty. */
+  /** Where the target's per-pair costs came from; "mixed" when some pairs were filled from bills and others from the response. */
+  target_cost_origin: CostOrigin | "mixed" | null;
+  /** Reported cost restricted to pairs where both sides finished normally (stop / tool_calls) and neither was empty. */
   cost_complete_pairs: CostSplit;
-  /** Token totals per side over pairs. */
+  /** Token totals per side over pairs, as each provider reported them. */
   tokens: PerSide<TokenTotals>;
   /** cached_tokens / prompt_tokens per side; null when no prompt tokens were reported. */
   cache_share: PerSide<number | null>;
@@ -89,7 +94,8 @@ export interface TargetModelStats {
   target_upstreams: Record<string, number>;
   /** `exact`, `json`, `numeric` and `llm` are how the judged pairs were scored; they sum to `judged`. */
   agreement: { judged: number; agreed: number; rate: number | null; exact: number; json: number; numeric: number; llm: number } | null;
-  tool_calls: { pairs: number; valid_json: number; name_match: number } | null;
+  /** Tool-call agreement counts (never the calls themselves): named tool_call_stats so the publish filter, which forbids any key called tool_calls, lets aggregates through. */
+  tool_call_stats: { pairs: number; valid_json: number; name_match: number } | null;
   /** Pairs where a side hit its token cap (finish_reason "length"); excluded from agreement. */
   truncated: { pairs: number; primary_only: number; target_only: number; both: number };
   /** Judged pairs skipped because a side returned its reasoning channel instead of an answer. `pairs` is the total; the per-side counts say which side leaked (both can). */
@@ -106,6 +112,15 @@ export interface ReasoningLeak {
 
 export type ProjectionConfidence = "low" | "ok";
 
+/** A model the target refused: every listed attempt failed with a rejection (model_not_found, bad_request, unsupported_parameter, auth). */
+export interface Rejected {
+  model: string;
+  target_model: string | null;
+  /** Rejected attempts. */
+  attempts: number;
+  error_type: string;
+}
+
 export interface TargetSummary {
   target: string;
   name?: string;
@@ -114,33 +129,32 @@ export interface TargetSummary {
   pairs: number;
   errors: number;
   error_rate: number | null;
-  unmapped_requests: number;
+  /** Models the target refused outright (see `Rejected`). */
+  rejected: Rejected[];
+  /** Share of mirrored requests the target accepted (did not reject with model_not_found, bad_request, unsupported_parameter or auth). */
   coverage_pct: number | null;
   no_output: PerSide<number>;
-  unpriced: number;
-  unpriced_primary: number;
+  cost_not_reported: PerSide<number>;
   truncated: { pairs: number; primary_only: number; target_only: number; both: number };
   reasoning_leak: ReasoningLeak;
-  /** Projection: primary's full spend on each mapped model, scaled by that model's paired cost ratio, then to 30 days. */
+  /** Projection: primary's full spend on each mirrored model, scaled by that model's paired cost ratio, then to 30 days. */
   projected_monthly_usd: number | null;
   comparable_monthly_usd: number | null;
   delta_usd: number | null;
   delta_pct: number | null;
   projection_confidence: ProjectionConfidence;
-  /** As-served cost over priced pairs across all models (no projection). */
-  measured: CostSplit;
+  /** Reported-or-billed cost over pairs with a cost on both sides, across all models (no projection). */
+  reported: CostSplit;
+  target_cost_origin: CostOrigin | "mixed" | null;
   avg_cost_per_request_usd: PerSide<number | null>;
-  target_cost_cache_neutral_usd: number | null;
-  delta_pct_cache_neutral: number | null;
-  target_cost_price_only_usd: number | null;
-  delta_pct_price_only: number | null;
   cost_complete_pairs: CostSplit;
+  /** Token totals per side over pairs, as each provider reported them. Always present so an agent can take the counts to a provider's current pricing page. */
   tokens: PerSide<TokenTotals>;
   cache_share: PerSide<number | null>;
-  /** Set when one side's cache share exceeds the other's by more than 20 points. */
+  /** Set when one side's cache share exceeds the other's by more than 20 points: the reported delta includes that discount. */
   cache_warning: string | null;
-  /** The number shown first: cache-neutral when the cache warning fires (one side ran warm), otherwise as served. */
-  headline: { delta_pct: number | null; basis: "as_served" | "cache_neutral"; note: string };
+  /** The number shown first: the delta of reported-or-billed costs over pairs with a cost on both sides. null delta when the target has no cost; `note` then explains why and what to do. */
+  headline: { delta_pct: number | null; basis: "as_served"; note: string };
   /** Fraction of completed pairs the judge scored (1 = every pair). */
   judge_fraction: number;
   /** Up to three of the model judge's reasons for DISAGREE verdicts across this target's models. */
@@ -155,9 +169,6 @@ export interface TargetSummary {
   ttft_first_content: PerSide<Quantiles>;
   agreement_rate: number | null;
   agreement_judged: number;
-  gaps: Array<{ model: string; requests: number; suggestion?: string | null }>;
-  /** Mapped models where every attempt failed with a non-transient error: listed by the target but not usable. */
-  failing: Array<{ model: string; target_model: string | null; attempts: number; error_type: string }>;
 }
 
 export interface ReportAggregates {
@@ -173,12 +184,13 @@ export interface ReportAggregates {
     requests_ok: number;
     errors: number;
     no_output: number;
-    unpriced: number;
+    /** Ok responses with no provider-reported cost. */
+    cost_not_reported: number;
+    /** Sum of the costs the primary reported. */
     cost_usd: number;
-    cost_source: "measured" | "computed" | "mixed" | "unknown";
+    cost_source: "reported" | "not_reported" | "mixed";
     avg_cost_per_request_usd: number | null;
     monthly_usd: number;
-    topup_fee_usd: number | null;
     latency: Quantiles;
     /** TTFT over ok, non-empty primary responses that reported one. Labelled by `ttft_method`; not compared with targets here. */
     ttft: Quantiles;
@@ -196,7 +208,6 @@ export interface ReportAggregates {
   target_models: TargetModelStats[];
   method: {
     costs: string;
-    cost_deltas: string;
     complete_pairs: string;
     empty_outputs: string;
     sampling: string;
@@ -205,7 +216,6 @@ export interface ReportAggregates {
     agreement: string;
     judge_model: string | null;
     sample_size_note: string | null;
-    prices: Array<{ target: string; captured?: string; source?: string }>;
   };
 }
 

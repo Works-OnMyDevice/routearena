@@ -31,7 +31,6 @@ const { buildReport } = await import(path.join(ROOT, "dist/report/build.js").rep
 loadDotenv();
 if (!process.env.TOKENROUTER_MANAGEMENT_KEY && fs.existsSync("relay/.env")) for (const line of fs.readFileSync("relay/.env", "utf8").split(/\r?\n/)) { const m = line.match(/^\s*TOKENROUTER_MANAGEMENT_KEY\s*=\s*(.*)\s*$/); if (m) process.env.TOKENROUTER_MANAGEMENT_KEY = m[1].replace(/^["']|["']$/g, ""); }
 const OR = process.env.OPENROUTER_API_KEY, TR = process.env.TOKENROUTER_API_KEY;
-const trPrices = JSON.parse(fs.readFileSync("targets/tokenrouter.json", "utf8")).models;
 const out = { started: new Date().toISOString(), spend_usd: 0, sections: {} };
 let spent = 0;
 const guard = (label) => { if (spent > CAP) throw new Error(`spend guard: $${spent.toFixed(4)} > cap $${CAP} before ${label}`); };
@@ -199,8 +198,8 @@ async function reasoningProbe(rep) {
     const res = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${router === "openrouter" ? OR : TR}`, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
     const j = await res.json();
     const u = j.usage ?? {};
-    const p = trPrices[it.model];
-    const cost = router === "openrouter" ? u.cost ?? 0 : ((u.prompt_tokens ?? 0) * p.input_per_m + (u.completion_tokens ?? 0) * p.output_per_m) / 1e6;
+    // TokenRouter reports no cost per response; the validator shows tokens for it and bills OpenRouter from usage.cost.
+    const cost = router === "openrouter" ? u.cost ?? 0 : 0;
     spent += cost;
     const content = j.choices?.[0]?.message?.content ?? "";
     rows.push({ item: it.id, router, upstream: j.provider ?? "(not reported)", control: control ? `${control}=low` : "(omitted)", max_tokens: S5_MAX, status: res.status, finish: j.choices?.[0]?.finish_reason ?? j.error?.message?.slice(0, 60), completion_tokens: u.completion_tokens, reasoning_tokens: u.completion_tokens_details?.reasoning_tokens ?? "n/a", content_chars: content.length, ms: Date.now() - t0, cost_usd: +cost.toFixed(6) });
@@ -310,8 +309,8 @@ section("6. Same-route agreement baseline (each prompt twice on the same router,
     const url = router === "openrouter" ? "https://openrouter.ai/api/v1/chat/completions" : "https://api.tokenrouter.com/v1/chat/completions";
     const res = await fetch(url, { method: "POST", headers: { authorization: `Bearer ${router === "openrouter" ? OR : TR}`, "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(180000) });
     const j = await res.json();
-    const u = j.usage ?? {}, p = trPrices[it.model] ?? { input_per_m: 0, output_per_m: 0 };
-    const cost = router === "openrouter" ? u.cost ?? 0 : ((u.prompt_tokens ?? 0) * p.input_per_m + (u.completion_tokens ?? 0) * p.output_per_m) / 1e6;
+    const u = j.usage ?? {};
+    const cost = router === "openrouter" ? u.cost ?? 0 : 0; // TokenRouter cost is not in the response; see section 4 for its billed rows
     spent += cost;
     return { ok: res.status === 200 && !!j.choices?.[0], text: j.choices?.[0]?.message?.content ?? "", finish: j.choices?.[0]?.finish_reason ?? null, cost };
   };

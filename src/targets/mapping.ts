@@ -1,11 +1,11 @@
-import type { PriceEntry, Target } from "./index.js";
+import type { Target } from "./index.js";
 import type { PrimaryId } from "../config.js";
 
 /**
- * Canonical model ids are OpenRouter ids, lowercase: "vendor/model-name".
- * OpenAI-direct requests use bare ids ("gpt-4o-mini"); we canonicalize them to "openai/gpt-4o-mini".
+ * Canonical model ids are OpenRouter ids, lowercase: "vendor/model-name". Used only to group requests in the
+ * report. OpenAI-direct requests use bare ids ("gpt-4o-mini"); we canonicalize them to "openai/gpt-4o-mini".
  * OpenRouter variant suffixes (":free", ":nitro", ":floor", ":online", ":exacto", ":thinking") are stripped
- * for mapping purposes but kept in the raw model string that the report shows.
+ * for grouping but kept in the raw model string that the report shows.
  */
 export function canonicalModel(primary: PrimaryId, model: string): string {
   let m = (model || "").trim().toLowerCase();
@@ -20,38 +20,31 @@ export function canonicalModel(primary: PrimaryId, model: string): string {
   return m;
 }
 
-/** The generic shape-normalizer used only to *suggest* mappings; never used to produce report numbers. */
-export function normalizeForSuggestion(id: string): string {
-  let s = id.toLowerCase();
-  s = s.replace(/^accounts\/[^/]+\/models\//, ""); // fireworks
-  s = s.replace(/^[^/]+\//, ""); // drop vendor prefix
-  s = s.replace(/[:@].*$/, ""); // variant / revision
-  s = s.replace(/-instruct(-turbo)?$/, "");
-  s = s.replace(/-turbo$/, "");
-  s = s.replace(/[._]/g, "-");
-  s = s.replace(/-+/g, "-");
-  return s;
+/** Per-target model overrides: target id -> (model id as the client sends it -> id to send to that target). */
+export type ModelMap = Record<string, Record<string, string>>;
+
+/** Drop an OpenRouter variant suffix (":nitro", ":floor", ":free", ...) that other routers do not understand. */
+function stripVariant(model: string): string {
+  const colon = model.indexOf(":");
+  return colon > 0 ? model.slice(0, colon) : model;
 }
 
-export interface MappedModel {
-  canonical: string;
-  entry: PriceEntry;
-}
-
-/** Explicit lookup only. Unmapped stays unmapped (that is product feedback, see coverage gaps). */
-export function mapModel(target: Target, canonical: string): MappedModel | null {
-  const entry = target.models[canonical.toLowerCase()];
-  if (!entry) return null;
-  return { canonical, entry };
-}
-
-/** Suggest a probable mapping for a coverage-gap line, clearly labeled as a guess. */
-export function suggestMapping(target: Target, canonical: string): string | null {
-  const want = normalizeForSuggestion(canonical);
-  for (const [k, v] of Object.entries(target.models)) {
-    if (normalizeForSuggestion(k) === want || normalizeForSuggestion(v.id) === want) return v.id;
+/**
+ * The model id to send to `target` for a request the client made with `original` (the id exactly as sent).
+ *
+ * RouteArena ships no mappings: by default the client's id is forwarded unchanged (minus an OpenRouter variant
+ * suffix). The user's agent can override per target through `model_map` in .routearena/config.json, keyed by
+ * either the canonical id or the id as the client sent it.
+ */
+export function mapModel(target: Target, canonical: string, overrides: ModelMap | undefined, original: string = canonical): string {
+  const forTarget = overrides?.[target.id];
+  if (forTarget) {
+    const byCanonical = forTarget[canonical] ?? forTarget[canonical.toLowerCase()];
+    if (typeof byCanonical === "string" && byCanonical) return byCanonical;
+    const byOriginal = forTarget[original] ?? forTarget[stripVariant(original)];
+    if (typeof byOriginal === "string" && byOriginal) return byOriginal;
   }
-  return null;
+  return stripVariant(original);
 }
 
 export interface Usage {
@@ -60,7 +53,14 @@ export interface Usage {
   total_tokens?: number;
   prompt_tokens_details?: { cached_tokens?: number };
   completion_tokens_details?: { reasoning_tokens?: number };
+  /** Per-request USD the provider itself reported (OpenRouter). Absent from most providers. */
   cost?: number;
+}
+
+/** The provider-reported cost in a usage record, or null when the provider reported none. Never computed. */
+export function reportedCost(usage: Usage | undefined | null): number | null {
+  const c = usage?.cost;
+  return typeof c === "number" && Number.isFinite(c) ? c : null;
 }
 
 /** Token totals pulled out of a usage record, with missing fields read as 0. */
@@ -91,35 +91,3 @@ export function addTokenTotals(a: TokenTotals, b: TokenTotals): TokenTotals {
 }
 
 export const zeroTokens = (): TokenTotals => ({ prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, reasoning_tokens: 0 });
-
-/** USD cost for a usage record at the given prices. Cached tokens are charged at the cached rate when known. */
-export function computeCost(entry: PriceEntry, usage: Usage | undefined | null): number | null {
-  if (!usage) return null;
-  const p = usage.prompt_tokens ?? 0;
-  const c = usage.completion_tokens ?? 0;
-  const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
-  const uncached = Math.max(0, p - cached);
-  const inRate = entry.input_per_m / 1e6;
-  const cachedRate = (entry.cached_input_per_m ?? entry.input_per_m) / 1e6;
-  const outRate = entry.output_per_m / 1e6;
-  return uncached * inRate + cached * cachedRate + c * outRate;
-}
-
-/**
- * USD the cached-input discount was worth for this usage at these prices: cached tokens x (full input rate - cached rate).
- * Adding it back to a computed cost gives the cache-neutral cost (every prompt token at the full input rate).
- */
-export function cacheDiscountUsd(entry: PriceEntry, usage: Usage | undefined | null): number {
-  if (!usage) return 0;
-  const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
-  if (!cached || entry.cached_input_per_m === undefined) return 0;
-  return Math.max(0, cached * (entry.input_per_m - entry.cached_input_per_m)) / 1e6;
-}
-
-/** Cost with every prompt token at the full input rate, so a cache hit on one side cannot flatter its price. */
-export function computeCostCacheNeutral(entry: PriceEntry, usage: Usage | undefined | null): number | null {
-  if (!usage) return null;
-  const p = usage.prompt_tokens ?? 0;
-  const c = usage.completion_tokens ?? 0;
-  return (p * entry.input_per_m + c * entry.output_per_m) / 1e6;
-}

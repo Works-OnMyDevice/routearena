@@ -55,6 +55,12 @@ export interface Config {
   mirrorImages?: boolean;
   maxInputTokens?: number;
   hourlyCap?: number;
+  /**
+   * Per-target model overrides: target id -> (model id as the client sends it -> id to send to that target).
+   * Set by the user's agent; RouteArena ships no mappings. Without an entry a mirror receives the client's
+   * model id unchanged. Persisted in .routearena/config.json and read by the proxy on start.
+   */
+  model_map?: Record<string, Record<string, string>>;
   createdAt: string;
 }
 

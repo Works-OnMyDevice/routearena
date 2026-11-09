@@ -25,11 +25,8 @@ import {
   type PrimaryId,
 } from "./config.js";
 import { fetchBalance, startClaim, waitForVerification } from "./credits/claim.js";
-import { loadWorkload, runDemo } from "./demo/run.js";
+import { assignModels, loadWorkload, runDemo } from "./demo/run.js";
 import { startProxy } from "./proxy/server.js";
-import { fetchActivity } from "./replay/activityApi.js";
-import { readUsageCsvFile } from "./replay/csv.js";
-import { estimateReplay } from "./replay/estimate.js";
 import { buildReport } from "./report/build.js";
 import { fmtMs, fmtPct, fmtUsd } from "./report/html.js";
 import { publishAggregates } from "./report/publish.js";
@@ -67,11 +64,34 @@ function jsonOpt(cmd: Command): Command {
   return cmd.option("--json", "print a single JSON object to stdout", false);
 }
 
+const MODELS_FIX = "Pass --models with the OpenRouter-style model ids your traffic uses, comma-separated, e.g. --models openai/gpt-4o-mini,deepseek/deepseek-chat. Your OpenRouter activity page (openrouter.ai/activity) lists the ids you already pay for; RouteArena ships no model list and picks none for you.";
+
+/** Parse `--models a,b,c` into trimmed, non-empty ids. */
+function parseModels(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw.trim()) throw new CliError("--models is required.", MODELS_FIX);
+  const ids = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!ids.length) throw new CliError("--models is empty.", MODELS_FIX);
+  return ids;
+}
+
+/** Parse repeated `--map <target>:<model>=<targetModel>` into a model_map. */
+function parseMaps(raw: string[] | undefined, into: Record<string, Record<string, string>> = {}): Record<string, Record<string, string>> {
+  for (const m of raw ?? []) {
+    const match = /^([^:=\s]+):([^=\s]+)=(\S+)$/.exec(m.trim());
+    if (!match) throw new CliError(`Cannot parse --map "${m}".`, "Format: --map <target>:<model>=<targetModel>, e.g. --map groq:openai/gpt-4o-mini=gpt-4o-mini. Repeat --map for each model.");
+    const [, target, model, targetModel] = match;
+    const unknown = unknownTargetIds([target]);
+    if (unknown.length) throw new CliError(`Unknown target in --map: ${target}`, `Known targets: ${loadTargets().map((t) => t.id).join(", ")}`);
+    into[target] = { ...(into[target] ?? {}), [model.toLowerCase()]: targetModel };
+  }
+  return into;
+}
+
 program
   .name("routearena")
-  .description("See what your LLM traffic would cost on other providers. Your keys stay on your machine.")
+  .description("See what your LLM traffic costs on other providers, from what each provider reports. Your keys stay on your machine.")
   .version(VERSION)
-  .addHelpText("after", `\nExamples:\n  $ npx routearena@latest check --json\n  $ npx routearena@latest replay ./openrouter-activity.csv\n  $ npx routearena@latest init --primary openrouter --free-credits --email you@example.com\n  $ npx routearena@latest start          # then set baseURL to http://localhost:4000/v1\n  $ npx routearena@latest demo\n  $ npx routearena@latest report --publish\n\n${agentProtocol()}`);
+  .addHelpText("after", `\nExamples:\n  $ npx routearena@latest check --json\n  $ npx routearena@latest init --primary openrouter --free-credits --email you@example.com\n  $ npx routearena@latest start          # then set baseURL to http://localhost:4000/v1\n  $ npx routearena@latest demo --models openai/gpt-4o-mini,deepseek/deepseek-chat\n  $ npx routearena@latest report --publish\n\n${agentProtocol()}`);
 
 // ---------- check ----------
 jsonOpt(program.command("check"))
@@ -88,7 +108,7 @@ jsonOpt(program.command("check"))
       const targets: Record<string, string> = {};
       for (const t of loadTargets()) targets[t.id] = targetStatus(t, process.env, credits);
       const keysFound = KEY_ENVS.filter((k) => !!process.env[k]);
-      const primaryBalance = await probePrimaryBalance(process.env.OPENROUTER_API_KEY, () => { if (!o.json) log("  openrouter balance reads $0.00; sending one 1-token request to openai/gpt-4o-mini (about $0.000003) to check whether requests are actually refused…"); });
+      const primaryBalance = await probePrimaryBalance(process.env.OPENROUTER_API_KEY, () => { if (!o.json) log("  openrouter balance reads $0.00; sending one 1-token request to openai/gpt-4o-mini to check whether requests are actually refused…"); });
       let creditsInfo: Record<string, unknown> = { claimed: false };
       if (credits) {
         creditsInfo = { claimed: true, expires_at: credits.expiresAt, budget_usd: credits.budgetUsd };
@@ -111,7 +131,7 @@ jsonOpt(program.command("check"))
         credits: creditsInfo,
         config: cfg ? { exists: true, primary: cfg.primary, sample: cfg.sample, port: cfg.port } : { exists: false },
         log_records: fs.existsSync(logPath()) ? fs.readFileSync(logPath(), "utf8").split("\n").filter(Boolean).length : 0,
-        ready: { replay_from_api: !!process.env.OPENROUTER_MANAGEMENT_KEY, replay_from_csv: "pass an OpenRouter activity CSV to `replay`", live: primaries.length > 0 && Object.values(targets).some((s) => s !== "no-key") },
+        ready: { live: primaries.length > 0 && Object.values(targets).some((s) => s !== "no-key") },
         next: primaryBalance?.empty ? "Your OpenRouter balance is at or below zero. OpenRouter reserves an estimate for every in-flight request and refuses with 402 when the balance cannot cover it, so parallel requests fail first. Add credits at openrouter.ai/settings/credits (or run demo with --concurrency 1), then run check again." : nextStep(primaries, targets, cfg),
       };
       out(o, result, () => {
@@ -131,7 +151,7 @@ jsonOpt(program.command("check"))
 /**
  * OpenRouter exposes purchased credit at /api/v1/credits, but promotional and free-tier credit does not appear there
  * (measured 2026-11-08: total_credits 0 while paid models kept answering). So a non-positive balance is confirmed with
- * one minimal request (about $0.000003) and reported as empty only when OpenRouter actually refuses with 402.
+ * one minimal request and reported as empty only when OpenRouter actually refuses with 402.
  */
 async function probePrimaryBalance(key: string | undefined, announce?: () => void): Promise<{ provider: "openrouter"; remaining_usd: number | null; empty: boolean; note?: string; probe?: { sent: true; model: string; status: number; error?: string } } | null> {
   if (!key) return null;
@@ -154,7 +174,7 @@ async function probePrimaryBalance(key: string | undefined, announce?: () => voi
   }
 }
 
-/** One 1-token request to the cheapest common model; about $0.000003. Only sent when the balance endpoint reads zero. */
+/** One 1-token request to a common model. Only sent when the balance endpoint reads zero. */
 async function openrouterCreditProbe(key: string): Promise<{ sent: true; model: string; status: number; error?: string }> {
   const model = "openai/gpt-4o-mini";
   try {
@@ -174,7 +194,7 @@ function nextStep(primaries: string[], targets: Record<string, string>, cfg: Con
   if (!primaries.length) return "Add OPENROUTER_API_KEY or OPENAI_API_KEY to .env, then run check again.";
   if (!Object.values(targets).some((s) => s !== "no-key")) return "No target is reachable. Run: routearena init --primary " + primaries[0] + " --free-credits --email you@example.com  (or add a target key such as GROQ_API_KEY).";
   if (!cfg) return "Run: routearena init --primary " + primaries[0];
-  return "Run: routearena start   (then point baseURL at http://localhost:" + cfg.port + "/v1)  or: routearena demo";
+  return "Run: routearena start   (then point baseURL at http://localhost:" + cfg.port + "/v1)  or: routearena demo --models <ids>";
 }
 
 // ---------- init ----------
@@ -184,12 +204,12 @@ jsonOpt(program.command("init"))
   .option("--sample <fraction>", "fraction of eligible requests to mirror (0..1)", parseFloat)
   .option("--port <port>", "proxy port", (v) => parseInt(v, 10))
   .option("--targets <ids>", "comma-separated target ids to mirror to (default: every target with a key or credits)")
+  .option("--map <spec>", "send <model> to <target> as <targetModel>: --map <target>:<model>=<targetModel> (repeatable; default: the same id)", (v: string, acc: string[]) => [...acc, v], [] as string[])
   .option("--free-credits", "claim $1 of free TokenRouter mirror credits (needs --email)")
   .option("--email <email>", "email for the free-credits magic link")
   .option("--no-credits", "skip free credits")
   .option("--resume <claimId>", "resume waiting on a claim you already started")
-  .option("--byok", "you bring your own upstream keys to OpenRouter; hides the 5.5% top-up fee line")
-  .addHelpText("after", "\nExamples:\n  $ routearena init --primary openrouter --free-credits --email you@example.com\n  $ routearena init --primary openai --no-credits --sample 0.25")
+  .addHelpText("after", "\nExamples:\n  $ routearena init --primary openrouter --free-credits --email you@example.com\n  $ routearena init --primary openai --no-credits --sample 0.25\n  $ routearena init --map groq:openai/gpt-4o-mini=gpt-4o-mini --map groq:meta-llama/llama-3.1-8b-instruct=llama-3.1-8b-instant")
   .action(async (opts: any) => {
     const o: Out = { json: !!opts.json };
     try {
@@ -206,6 +226,7 @@ jsonOpt(program.command("init"))
         const unknown = unknownTargetIds(targets);
         if (unknown.length) throw new CliError(`Unknown target(s): ${unknown.join(", ")}`, `Known targets: ${loadTargets().map((t) => t.id).join(", ")}`);
       }
+      const model_map = parseMaps(opts.map, { ...(existing?.model_map ?? {}) });
       const cfg: Config = {
         ...DEFAULT_CONFIG,
         ...(existing ?? {}),
@@ -213,7 +234,7 @@ jsonOpt(program.command("init"))
         sample: opts.sample ?? existing?.sample ?? DEFAULT_CONFIG.sample,
         port: opts.port ?? existing?.port ?? DEFAULT_CONFIG.port,
         targets,
-        byok: opts.byok ?? existing?.byok ?? false,
+        ...(Object.keys(model_map).length ? { model_map } : {}),
         createdAt: existing?.createdAt ?? new Date().toISOString(),
       };
       saveConfig(cfg);
@@ -234,66 +255,9 @@ jsonOpt(program.command("init"))
         credits = { claimed: true, budget_usd: cr.budgetUsd, expires_at: cr.expiresAt };
       }
       out(o, { ok: true, config: cfg, config_path: path.join(configDir(), "config.json"), credits, relay: RELAY_URL }, () => {
-        log(`wrote ${path.join(configDir(), "config.json")} (primary ${cfg.primary}, sample ${cfg.sample})`);
+        log(`wrote ${path.join(configDir(), "config.json")} (primary ${cfg.primary}, sample ${cfg.sample}${Object.keys(model_map).length ? `, ${Object.values(model_map).reduce((n, m) => n + Object.keys(m).length, 0)} model mappings` : ""})`);
         if (credits.claimed) log(`free TokenRouter credits: ${"budget_usd" in credits ? fmtUsd(credits.budget_usd as number) : "claimed"}${credits.expires_at ? `, expire ${String(credits.expires_at).slice(0, 10)}` : ""}`);
-        log("next: routearena start   or   routearena demo");
-      });
-    } catch (e) {
-      fail(o, e);
-    }
-  });
-
-// ---------- replay ----------
-jsonOpt(program.command("replay [file]"))
-  .description("project your OpenRouter activity export (CSV) onto each target's price list")
-  .option("--from-api", "use the OpenRouter activity API (needs OPENROUTER_MANAGEMENT_KEY)")
-  .option("--targets <ids>", "comma-separated target ids")
-  .option("--byok", "hide the OpenRouter 5.5% top-up fee line")
-  .option("--out <dir>", "also write replay.json and replay.html here")
-  .addHelpText("after", "\nExamples:\n  $ routearena replay ./openrouter-activity.csv\n  $ routearena replay --from-api --json\n\nGet the CSV: openrouter.ai/activity > click the Model card > Export > CSV.")
-  .action(async (file: string | undefined, opts: any) => {
-    const o: Out = { json: !!opts.json };
-    try {
-      loadDotenv();
-      let usage;
-      if (opts.fromApi) {
-        const mk = process.env.OPENROUTER_MANAGEMENT_KEY;
-        if (!mk) throw new CliError("OPENROUTER_MANAGEMENT_KEY is not set.", "Create a management key at openrouter.ai/settings/management-keys, add it to .env, or pass a CSV file instead.");
-        usage = await fetchActivity(mk);
-      } else {
-        if (!file) throw new CliError("No CSV file given.", "Run: routearena replay <file.csv>  (or --from-api with OPENROUTER_MANAGEMENT_KEY). Export: openrouter.ai/activity > click the Model card > Export > CSV.");
-        usage = readUsageCsvFile(file);
-      }
-      let targets = loadTargets().filter((t) => t.id !== "openrouter");
-      if (opts.targets) {
-        const ids = String(opts.targets).split(",").map((s: string) => s.trim());
-        const unknown = unknownTargetIds(ids);
-        if (unknown.length) throw new CliError(`Unknown target(s): ${unknown.join(", ")}`, `Known targets: ${loadTargets().map((t) => t.id).join(", ")}`);
-        targets = targets.filter((t) => ids.includes(t.id));
-      }
-      const est = estimateReplay(usage, targets, { byok: !!opts.byok });
-      const result = { ok: true, source: opts.fromApi ? "openrouter-activity-api" : file, columns_detected: usage.detected, ...est };
-      if (opts.out) {
-        fs.mkdirSync(opts.out, { recursive: true });
-        fs.writeFileSync(path.join(opts.out, "replay.json"), JSON.stringify(result, null, 2));
-      }
-      out(o, result, () => {
-        const c = est.current;
-        log(`period: ${est.period ? `${est.period.from} to ${est.period.to} (${est.period.days}d)` : "unknown"} · ${c.requests.toLocaleString()} requests · ${(c.prompt_tokens + c.completion_tokens).toLocaleString()} tokens`);
-        log(`current OpenRouter spend: ${fmtUsd(c.cost_usd)} (${c.cost_source})${est.period ? ` → ${fmtUsd(c.monthly_usd)} / 30 days` : ""}${c.topup_fee_usd !== null ? ` + ${fmtUsd(c.topup_fee_usd)} top-up fee (5.5%)` : ""}`);
-        log("");
-        log("target        projected/mo   delta        coverage(req)  unmapped models");
-        for (const t of est.targets) {
-          log(`${t.name.padEnd(13)} ${fmtUsd(t.projected_usd).padStart(12)}   ${fmtPct(t.delta_pct).padStart(7)}      ${fmtPct(t.coverage_requests_pct, false).padStart(6)}        ${t.unmapped_models}`);
-        }
-        const gaps = est.targets.flatMap((t) => t.gaps.slice(0, 3).map((g) => `${t.target}: ${g.model} (${g.requests} req${g.suggestion ? `, maybe ${g.suggestion}` : ""})`));
-        if (gaps.length) {
-          log("");
-          log("coverage gaps (top):");
-          for (const g of gaps) log("  " + g);
-        }
-        for (const w of est.warnings) log(`note: ${w}`);
-        log("\nAll target costs are computed from public price tables (dates in --json output). Deltas compare mapped models only.");
+        log("next: routearena start   or   routearena demo --models <ids>");
       });
     } catch (e) {
       fail(o, e);
@@ -430,15 +394,17 @@ jsonOpt(program.command("stop"))
 // ---------- demo ----------
 jsonOpt(program.command("demo"))
   .description("send a real extraction workload through the proxy with 100% mirroring, then build the report")
+  .requiredOption("--models <ids>", "comma-separated OpenRouter-style model ids to run the workload on (you choose; RouteArena ships no model list)")
   .option("--requests <n>", "number of workload items to send (default 40, max 101)", (v) => parseInt(v, 10), 40)
   .option("--port <port>", "proxy port", (v) => parseInt(v, 10))
   .option("--concurrency <n>", "parallel requests", (v) => parseInt(v, 10), 4)
   .option("--no-report", "skip building the report afterwards")
-  .addHelpText("after", "\nExample:\n  $ routearena demo --requests 40 --json\n\nThe workload is real web-extraction prompts over real public pages (see demo/README.md). Costs are real: roughly $0.05 to $0.15 per provider for the default 40 requests.")
+  .addHelpText("after", "\nExample:\n  $ routearena demo --models openai/gpt-4o-mini,deepseek/deepseek-chat --requests 40 --json\n\nThe workload is real web-extraction prompts over real public pages (see demo/README.md); items are assigned to your --models round-robin. Costs are real and are whatever each provider bills you.")
   .action(async (opts: any) => {
     const o: Out = { json: !!opts.json };
     try {
       loadDotenv();
+      const modelIds = parseModels(opts.models);
       const cfg = loadConfig() ?? { ...DEFAULT_CONFIG, createdAt: new Date().toISOString() };
       if (!loadConfig()) {
         const p = (Object.keys(PRIMARIES) as PrimaryId[]).find((x) => !!process.env[PRIMARIES[x].keyEnv]);
@@ -450,11 +416,11 @@ jsonOpt(program.command("demo"))
       const credits = loadCredits();
       const resolved = resolveTargets({ credits, only: cfg.targets, excludePrimary: cfg.primary }).filter((t) => t.status !== "no-key");
       if (!resolved.length) throw new CliError("No target is reachable (no target key and no free credits).", "Run: routearena init --free-credits --email you@example.com   or add a target key such as GROQ_API_KEY to .env.");
-      const items = (await loadWorkload()).slice(0, opts.requests);
+      const items = assignModels((await loadWorkload()).slice(0, opts.requests), modelIds);
       const demoCfg: Config = { ...cfg, sample: 1.0, port: opts.port ?? (cfg.port === 4000 ? 4017 : cfg.port + 17) };
       const proxy = await startProxy({ config: demoCfg, primaryKey: key, credits, mirrorTimeoutMs: 120_000 });
       const t0 = Date.now();
-      if (!o.json) log(`sending ${items.length} real extraction requests through ${PRIMARIES[cfg.primary].name}, mirroring 100% to ${resolved.map((r) => r.target.id).join(", ")}…`);
+      if (!o.json) log(`sending ${items.length} real extraction requests on ${modelIds.join(", ")} through ${PRIMARIES[cfg.primary].name}, mirroring 100% to ${resolved.map((r) => r.target.id).join(", ")}…`);
       const run = await runDemo(items, {
         proxyBase: `http://127.0.0.1:${proxy.port}/v1`,
         primary: cfg.primary,
@@ -469,7 +435,7 @@ jsonOpt(program.command("demo"))
       if (opts.report !== false) {
         if (!o.json) log("building report…");
         const r = await buildReport({ onProgress: (m) => (!o.json ? log("  " + m) : undefined) });
-        report = { html: r.htmlPath, json: r.jsonPath, records: r.records, summary: summarize(r.aggregates) };
+        report = { html: r.htmlPath, json: r.jsonPath, records: r.records, summary: await summarize(r.aggregates) };
       }
       const stopped = run.stopped
         ? {
@@ -480,8 +446,9 @@ jsonOpt(program.command("demo"))
                 : `${PRIMARIES[cfg.primary].name} rejected the key (${run.stopped.error_type}). Check ${PRIMARIES[cfg.primary].keyEnv} in .env, then run demo again.`,
           }
         : null;
-      out(o, { ok: run.ok > 0, sent: run.sent, primary_ok: run.ok, primary_failed: run.failed, stopped, mirrors: proxy.engine.stats, elapsed_ms: elapsed, report }, () => {
-        log(`done in ${(elapsed / 1000).toFixed(0)}s: ${run.ok}/${run.sent} completed on ${PRIMARIES[cfg.primary].name}; mirrors ok ${proxy.engine.stats.target_ok}, errors ${proxy.engine.stats.target_error}, unmapped ${proxy.engine.stats.unmapped}`);
+      const stats: Record<string, unknown> = proxy.engine.stats as any;
+      out(o, { ok: run.ok > 0, models: modelIds, sent: run.sent, primary_ok: run.ok, primary_failed: run.failed, stopped, mirrors: stats, elapsed_ms: elapsed, report }, () => {
+        log(`done in ${(elapsed / 1000).toFixed(0)}s: ${run.ok}/${run.sent} completed on ${PRIMARIES[cfg.primary].name}; mirrors ok ${stats.target_ok ?? 0}, errors ${stats.target_error ?? 0}`);
         if (stopped) log(`stopped early after ${stopped.after} requests: ${stopped.message}\n  fix: ${stopped.fix}`);
         if (report) printSummary(report.summary, report.html);
       });
@@ -496,19 +463,18 @@ jsonOpt(program.command("report"))
   .option("--publish", "upload aggregates (never prompts) to the relay and print a shareable URL")
   .option("--no-judge", "skip agreement judging")
   .option("--judge-sample <fraction>", "fraction of pairs to judge for agreement (default 0.25; 1 judges every pair)", parseFloat)
-  .option("--byok", "hide the OpenRouter 5.5% top-up fee line")
   .option("--open", "open the HTML report in your browser")
-  .addHelpText("after", "\nExamples:\n  $ routearena report\n  $ routearena report --publish --json")
+  .addHelpText("after", "\nExamples:\n  $ routearena report\n  $ routearena report --publish --json\n\nCosts are what each provider reported or billed. TokenRouter reports none per response: with free credits the relay fills in TokenRouter's billed amounts; with your own TokenRouter key the report shows token counts and leaves dollars to you.")
   .action(async (opts: any) => {
     const o: Out = { json: !!opts.json };
     try {
       loadDotenv();
-      if (!fs.existsSync(logPath())) throw new CliError("No log found at " + logPath(), "Run routearena start and send traffic through the proxy, or run routearena demo, then report again.");
-      const r = await buildReport({ byok: opts.byok, judge: opts.judge !== false, judgeSample: opts.judgeSample, onProgress: (m) => (!o.json ? log(m) : undefined) });
-      if (r.records === 0) throw new CliError("The log has no records yet.", "Send requests through the proxy (baseURL http://localhost:4000/v1) or run routearena demo.");
+      if (!fs.existsSync(logPath())) throw new CliError("No log found at " + logPath(), "Run routearena start and send traffic through the proxy, or run routearena demo --models <ids>, then report again.");
+      const r = await buildReport({ judge: opts.judge !== false, judgeSample: opts.judgeSample, onProgress: (m) => (!o.json ? log(m) : undefined) });
+      if (r.records === 0) throw new CliError("The log has no records yet.", "Send requests through the proxy (baseURL http://localhost:4000/v1) or run routearena demo --models <ids>.");
       let published: { url: string; id: string } | null = null;
       if (opts.publish) published = await publishAggregates(r.aggregates);
-      const summary = summarize(r.aggregates);
+      const summary = await summarize(r.aggregates);
       if (opts.open) {
         const cmd = process.platform === "win32" ? ["cmd", ["/c", "start", "", r.htmlPath]] : process.platform === "darwin" ? ["open", [r.htmlPath]] : ["xdg-open", [r.htmlPath]];
         spawn(cmd[0] as string, cmd[1] as string[], { detached: true, stdio: "ignore" }).unref();
@@ -522,10 +488,27 @@ jsonOpt(program.command("report"))
     }
   });
 
-function summarize(a: import("./report/aggregate.js").ReportAggregates) {
+/**
+ * The ASCII comparison lives in src/report/ascii.ts (another agent's file). Loaded dynamically so this CLI builds and
+ * runs before that module lands; once it exists this can become a static import.
+ */
+async function asciiComparison(a: import("./report/aggregate.js").ReportAggregates): Promise<string | null> {
+  try {
+    const spec = "./report/ascii.js";
+    const mod: any = await import(spec);
+    const fn = mod?.renderAsciiComparison;
+    return typeof fn === "function" ? String(fn(a, { width: Math.max(60, Math.min(120, process.stderr.columns ?? 100)) })) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function summarize(a: import("./report/aggregate.js").ReportAggregates) {
   const r4 = (n: number | null | undefined) => (n === null || n === undefined ? null : round4(n));
   const r1 = (n: number | null | undefined) => (n === null || n === undefined ? null : Math.round(n * 10) / 10);
   return {
+    /** Plain-text comparison table of the same aggregates, for terminals and chat. */
+    ascii: await asciiComparison(a),
     period: a.period,
     /** "low" when the log spans under 24 h or fewer than 50 pairs were measured; monthly figures are then rough extrapolations. */
     projection_confidence: a.projection?.confidence ?? "ok",
@@ -536,10 +519,11 @@ function summarize(a: import("./report/aggregate.js").ReportAggregates) {
       requests: a.primary.requests,
       no_output: a.primary.no_output ?? 0,
       cost_usd: round4(a.primary.cost_usd),
+      /** "reported": every ok response carried a provider cost; "mixed": some did; "not_reported": none did. */
       cost_source: a.primary.cost_source,
+      cost_not_reported: a.primary.cost_not_reported ?? 0,
       avg_cost_per_request_usd: a.primary.avg_cost_per_request_usd === null ? null : Math.round(a.primary.avg_cost_per_request_usd * 1e6) / 1e6,
       monthly_usd: round4(a.primary.monthly_usd),
-      topup_fee_usd: a.primary.topup_fee_usd === null ? null : round4(a.primary.topup_fee_usd),
       latency_p50_ms: a.primary.latency.p50,
       latency_p95_ms: a.primary.latency.p95,
       ttft_p50_ms: a.primary.ttft.p50,
@@ -552,20 +536,23 @@ function summarize(a: import("./report/aggregate.js").ReportAggregates) {
       projected_monthly_usd: r4(t.projected_monthly_usd),
       delta_usd: r4(t.delta_usd),
       delta_pct: r1(t.delta_pct),
-      /** As-served cost over pairs priced on both sides, no projection. */
-      measured: t.measured ? { pairs: t.measured.pairs, primary_cost_usd: round4(t.measured.primary_cost_usd), target_cost_usd: round4(t.measured.target_cost_usd), delta_pct: r1(t.measured.delta_pct) } : null,
-      /** The delta to quote first: cache-neutral when one side ran from a much warmer cache, otherwise as served. */
-      headline: t.headline ? { delta_pct: r1(t.headline.delta_pct), basis: t.headline.basis } : null,
-      delta_pct_cache_neutral: r1(t.delta_pct_cache_neutral),
-      delta_pct_price_only: r1(t.delta_pct_price_only),
+      /** The delta to quote first: reported-or-billed costs over pairs with a cost on both sides. delta_pct null when the target has no cost; `note` says why and what to do. */
+      headline: t.headline ? { delta_pct: r1(t.headline.delta_pct), basis: t.headline.basis, note: t.headline.note } : null,
+      /** Cost over pairs where both sides have one (reported on the response, or billed and read via the relay), no projection. */
+      reported: t.reported ? { pairs: t.reported.pairs, primary_cost_usd: round4(t.reported.primary_cost_usd), target_cost_usd: round4(t.reported.target_cost_usd), delta_pct: r1(t.reported.delta_pct), target_cost_origin: t.target_cost_origin ?? null } : null,
+      /** Ok sides in pairs with no reported or billed cost, per side; excluded from cost figures. */
+      cost_not_reported: t.cost_not_reported ?? { primary: 0, target: 0 },
       cost_complete_pairs: t.cost_complete_pairs ? { pairs: t.cost_complete_pairs.pairs, delta_pct: r1(t.cost_complete_pairs.delta_pct) } : null,
+      tokens: t.tokens ?? null,
       cache_share: t.cache_share ?? null,
       cache_warning: t.cache_warning ?? null,
       no_output: t.no_output ?? { primary: 0, target: 0 },
       truncated: t.truncated ?? { pairs: 0, primary_only: 0, target_only: 0, both: 0 },
       reasoning_leak: t.reasoning_leak ?? { pairs: 0, primary: 0, target: 0 },
-      unpriced: t.unpriced ?? 0,
+      /** Share of mirrored requests the target accepted (not rejected as model_not_found, bad_request, unsupported_parameter or auth). */
       coverage_pct: t.coverage_pct === null ? null : Math.round(t.coverage_pct),
+      /** Models the target rejected: "<model> -> <target_model> (<error_type>, n attempts)". */
+      rejected: (t.rejected ?? []).map((f) => ({ model: f.model, target_model: f.target_model, attempts: f.attempts, error_type: f.error_type })),
       latency_p50_ms: t.latency.p50,
       latency_p95_ms: t.latency.p95,
       ttft_p50_ms: t.ttft.p50,
@@ -577,33 +564,36 @@ function summarize(a: import("./report/aggregate.js").ReportAggregates) {
       agreement_judged: t.agreement_judged,
       judge_fraction: t.judge_fraction ?? 0.25,
       disagreement_reasons: t.disagreement_reasons ?? [],
-      gaps: t.gaps.map((g) => g.model),
-      failing: (t.failing ?? []).map((f) => `${f.model} (${f.error_type})`),
-      cost_source: "computed",
     })),
   };
 }
 const round4 = (n: number) => Math.round(n * 10_000) / 10_000;
 
-function printSummary(s: ReturnType<typeof summarize>, htmlPath: string) {
+function printSummary(s: Awaited<ReturnType<typeof summarize>>, htmlPath: string) {
   const low = s.projection_confidence === "low";
+  if (s.ascii) {
+    log("");
+    log(s.ascii);
+  }
   log("");
   log(
-    `${s.primary.provider}: ${s.primary.requests} requests, ${fmtUsd(s.primary.cost_usd)} (${s.primary.cost_source}), ${fmtUsd(s.primary.avg_cost_per_request_usd, 5)} per request, lat p50 ${fmtMs(s.primary.latency_p50_ms)} / p95 ${fmtMs(s.primary.latency_p95_ms)}, ${s.mirrored} mirrored${s.primary.no_output ? `, ${s.primary.no_output} returned no output` : ""}`,
+    `${s.primary.provider}: ${s.primary.requests} requests, ${fmtUsd(s.primary.cost_usd)} (${s.primary.cost_source}${s.primary.cost_not_reported ? `, ${s.primary.cost_not_reported} without a reported cost` : ""}), ${fmtUsd(s.primary.avg_cost_per_request_usd, 5)} per request, lat p50 ${fmtMs(s.primary.latency_p50_ms)} / p95 ${fmtMs(s.primary.latency_p95_ms)}, ${s.mirrored} mirrored${s.primary.no_output ? `, ${s.primary.no_output} returned no output` : ""}`,
   );
   log(low ? `monthly: ${fmtUsd(s.primary.monthly_usd)} rough extrapolation (${s.projection_reason ?? "low confidence"})` : `monthly: ${fmtUsd(s.primary.monthly_usd)} scaled from ${s.projection_basis === "elapsed_time" ? "elapsed time" : "calendar days"}`);
   for (const t of s.targets) {
-    const m = t.measured;
+    const r = t.reported;
     log("");
+    const origin = r?.target_cost_origin === "billed" ? "billed" : r?.target_cost_origin === "mixed" ? "reported or billed" : "reported";
+    const head = t.headline && t.headline.delta_pct !== null ? `${fmtPct(t.headline.delta_pct)} (${origin}, over ${r?.pairs ?? 0} pairs)` : "no cost delta";
+    log(`${t.target}: ${head}  |  Δ ${origin} ${fmtPct(r?.delta_pct)}${t.cost_not_reported.target || t.cost_not_reported.primary ? ` (no cost: target ${t.cost_not_reported.target}, primary ${t.cost_not_reported.primary})` : ""}  complete pairs ${fmtPct(t.cost_complete_pairs?.delta_pct)} (n=${t.cost_complete_pairs?.pairs ?? 0})`);
+    if (t.headline && t.headline.delta_pct === null && t.headline.note) log(`  ${t.headline.note}`);
+    if (t.tokens) log(`  tokens in/out: primary ${t.tokens.primary.prompt_tokens}/${t.tokens.primary.completion_tokens}, target ${t.tokens.target.prompt_tokens}/${t.tokens.target.completion_tokens}${t.tokens.primary.reasoning_tokens || t.tokens.target.reasoning_tokens ? ` (reasoning ${t.tokens.primary.reasoning_tokens}/${t.tokens.target.reasoning_tokens})` : ""}`);
     log(
-      `${t.target}: ${fmtPct(t.headline?.delta_pct ?? t.delta_pct)} (${t.headline?.basis === "cache_neutral" ? "cache-neutral" : "as served"})  |  Δ as served ${fmtPct(m?.delta_pct ?? t.delta_pct)}  cache-neutral ${fmtPct(t.delta_pct_cache_neutral)}  price-only ${fmtPct(t.delta_pct_price_only)}  complete pairs ${fmtPct(t.cost_complete_pairs?.delta_pct)} (n=${t.cost_complete_pairs?.pairs ?? 0})  over ${m?.pairs ?? 0} priced pairs${t.unpriced ? `, ${t.unpriced} unpriced` : ""}`,
-    );
-    log(
-      `  lat p50/p95 ${fmtMs(t.latency_p50_ms)} / ${fmtMs(t.latency_p95_ms)}   TTFT p50 ${t.ttft_method ? `${fmtMs(t.primary_ttft_p50_ms)} vs ${fmtMs(t.ttft_p50_ms)} (${t.ttft_method})` : "not comparable"}   errors ${t.error_rate === null ? "–" : fmtPct(t.error_rate * 100, false)}   no output ${t.no_output.primary}/${t.no_output.target}   truncated ${t.truncated.pairs} (primary ${t.truncated.primary_only}, target ${t.truncated.target_only}, both ${t.truncated.both})${t.reasoning_leak.pairs ? `   reasoning leak ${t.reasoning_leak.primary}/${t.reasoning_leak.target}` : ""}   agreement ${t.agreement_rate === null ? "not judged" : `${fmtPct(t.agreement_rate * 100, false)} (n=${t.agreement_judged})`}   coverage ${t.coverage_pct === null ? "–" : t.coverage_pct + "%"}`,
+      `  lat p50/p95 ${fmtMs(t.latency_p50_ms)} / ${fmtMs(t.latency_p95_ms)}   TTFT p50 ${t.ttft_method ? `${fmtMs(t.primary_ttft_p50_ms)} vs ${fmtMs(t.ttft_p50_ms)} (${t.ttft_method})` : "not comparable"}   errors ${t.error_rate === null ? "–" : fmtPct(t.error_rate * 100, false)}   no output ${t.no_output.primary}/${t.no_output.target}   truncated ${t.truncated.pairs} (primary ${t.truncated.primary_only}, target ${t.truncated.target_only}, both ${t.truncated.both})${t.reasoning_leak.pairs ? `   reasoning leak ${t.reasoning_leak.primary}/${t.reasoning_leak.target}` : ""}   agreement ${t.agreement_rate === null ? "not judged" : `${fmtPct(t.agreement_rate * 100, false)} (n=${t.agreement_judged})`}   accepted ${t.coverage_pct === null ? "–" : t.coverage_pct + "%"}`,
     );
     if (t.projected_monthly_usd !== null) log(`  monthly ${fmtUsd(t.projected_monthly_usd)} (${fmtPct(t.delta_pct)}, ${low ? "rough extrapolation" : "projected"})`);
     if (t.cache_warning) log(`  cache: ${t.cache_warning}`);
-    if (t.failing?.length) log(`  listed but failing on ${t.target}: ${t.failing.join(", ")}`);
+    if (t.rejected.length) log(`  rejected by ${t.target}: ${t.rejected.map((f) => `${f.model}${f.target_model && f.target_model !== f.model ? ` -> ${f.target_model}` : ""} (${f.error_type}, ${f.attempts})`).join(", ")}`);
   }
   if (s.sample_size_note) log(`note: ${s.sample_size_note}`);
   log(`report: ${htmlPath}`);
@@ -628,13 +618,13 @@ jsonOpt(program.command("credits"))
 
 // ---------- targets ----------
 jsonOpt(program.command("targets"))
-  .description("list targets, their status, and how many models each maps")
+  .description("list targets, the env var each needs, and whether a key or free credits are present")
   .action((o: Out) => {
     loadDotenv();
     const credits = loadCredits();
-    const rows = loadTargets().map((t) => ({ id: t.id, name: t.name, status: targetStatus(t, process.env, credits), key_env: t.keyEnv, models: Object.keys(t.models).length, prices_captured: t.pricesCaptured, free_credits: !!t.supportsFreeCredits }));
+    const rows = loadTargets().map((t) => ({ id: t.id, name: t.name, status: targetStatus(t, process.env, credits), key_env: t.keyEnv, reports_cost: !!t.reportsCost, free_credits: !!t.supportsFreeCredits }));
     out(o, { targets: rows }, () => {
-      for (const r of rows) log(`${r.id.padEnd(12)} ${r.status.padEnd(13)} ${String(r.models).padStart(3)} models  (${r.key_env}${r.free_credits ? ", free credits available" : ""})`);
+      for (const r of rows) log(`${r.id.padEnd(12)} ${r.status.padEnd(13)} ${r.key_env}${r.reports_cost ? "  reports cost per request" : ""}${r.free_credits ? "  free credits available" : ""}`);
     });
   });
 

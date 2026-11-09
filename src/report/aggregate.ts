@@ -1,9 +1,13 @@
 import type { LogRecord, SideResult } from "../proxy/logger.js";
-import { OPENROUTER_TOPUP_FEE } from "../replay/estimate.js";
-import type { PriceEntry } from "../targets/index.js";
-import { loadTargets } from "../targets/index.js";
-import { addTokenTotals, cacheDiscountUsd, computeCost, tokenTotals, zeroTokens, type TokenTotals } from "../targets/mapping.js";
+import { addTokenTotals, tokenTotals, zeroTokens, type TokenTotals } from "../targets/mapping.js";
 import { isReasoningLeak, type JudgeResult } from "./judge.js";
+
+/**
+ * Aggregation rules. RouteArena computes no prices and ships none: every cost figure here is a number a provider
+ * reported for a request (usage.cost on the response) or billed for it (TokenRouter's own bill for a free-credit
+ * key, read by the relay and joined to the pair by request id). A side without a reported or billed cost is counted
+ * as `cost_not_reported` and stays in latency, error, token and agreement figures but never enters a cost total.
+ */
 
 export interface Quantiles {
   p50: number | null;
@@ -19,7 +23,7 @@ export function quantiles(values: number[]): Quantiles {
 }
 
 /**
- * Fields the proxy logger is adding to each side. Older logs lack them, so every reader here treats them as optional
+ * Fields the proxy logger adds to each side. Older logs lack them, so every reader here treats them as optional
  * and falls back to the legacy fields (`ttft_ms` + `ttft_method`, `finish_reason` + `completion_text`).
  */
 export type SideExt = SideResult & {
@@ -27,6 +31,8 @@ export type SideExt = SideResult & {
   ttft_first_content_ms?: number;
   empty_output?: boolean;
   response_id?: string;
+  /** The provider's own id for this request (from its request-id header), used to join billing rows to pairs. */
+  target_request_id?: string;
 };
 
 /** Label for the TTFT measurement a pair was compared on. */
@@ -37,8 +43,11 @@ export interface PerSide<T> {
   target: T;
 }
 
+/** Where a cost figure came from. "reported": the provider put it on the response. "billed": the provider's own bill for the request (TokenRouter's, for a free-credit key, read by the relay), joined by request id. */
+export type CostOrigin = "reported" | "billed";
+
 export interface CostSplit {
-  /** Pairs that entered these totals. */
+  /** Pairs that entered these totals: both sides returned ok and both sides have a provider-reported cost. */
   pairs: number;
   primary_cost_usd: number;
   target_cost_usd: number;
@@ -55,28 +64,21 @@ export interface TargetModelStats {
   errors: number;
   error_rate: number | null;
   error_types: Record<string, number>;
-  unmapped: number;
   /** Status ok but no content and no tool calls (usually the token cap was spent on reasoning). Counted over pairs. */
   no_output: PerSide<number>;
-  /** Target sides with status ok but no cost (model not in the price table). Excluded from every cost figure, kept for latency and errors. */
-  unpriced: number;
-  /** Primary sides with status ok but no cost. Excluded from cost figures the same way. */
-  unpriced_primary: number;
-  /** Pairs that entered the as-served cost totals: both sides ok and both sides priced. */
+  /** Paired sides with status ok and no provider-reported cost. Excluded from every cost figure, kept for latency, errors, tokens and agreement. */
+  cost_not_reported: PerSide<number>;
+  /** Pairs that entered the cost totals: both sides ok and both sides reported a cost. */
   cost_pairs: number;
-  /** As-served cost over `cost_pairs`: what each side actually charged (or would charge, from its price table) for its own response. */
+  /** Sum of what each provider reported for its own response over `cost_pairs`. */
   primary_cost_usd: number;
   target_cost_usd: number;
   delta_pct: number | null;
-  /** Target cost with the target's cached tokens re-priced at its full input rate. null when the target's price table has no entry for this model. */
-  target_cost_cache_neutral_usd: number | null;
-  delta_pct_cache_neutral: number | null;
-  /** Target price table applied to the PRIMARY's token counts (same prompt, completion and cached tokens). Isolates price from output volume. */
-  target_cost_price_only_usd: number | null;
-  delta_pct_price_only: number | null;
-  /** As-served cost restricted to pairs where both sides finished normally (stop / tool_calls) and neither was empty. */
+  /** Where the target's per-pair costs came from; "mixed" when some pairs were filled from bills and others from the response. */
+  target_cost_origin: CostOrigin | "mixed" | null;
+  /** Reported cost restricted to pairs where both sides finished normally (stop / tool_calls) and neither was empty. */
   cost_complete_pairs: CostSplit;
-  /** Token totals per side over pairs. */
+  /** Token totals per side over pairs, as each provider reported them. */
   tokens: PerSide<TokenTotals>;
   /** cached_tokens / prompt_tokens per side; null when no prompt tokens were reported. */
   cache_share: PerSide<number | null>;
@@ -98,7 +100,8 @@ export interface TargetModelStats {
   target_upstreams: Record<string, number>;
   /** `exact`, `json`, `numeric` and `llm` are how the judged pairs were scored; they sum to `judged`. */
   agreement: { judged: number; agreed: number; rate: number | null; exact: number; json: number; numeric: number; llm: number } | null;
-  tool_calls: { pairs: number; valid_json: number; name_match: number } | null;
+  /** Tool-call agreement counts (never the calls themselves): named tool_call_stats so the publish filter, which forbids any key called tool_calls, lets aggregates through. */
+  tool_call_stats: { pairs: number; valid_json: number; name_match: number } | null;
   /** Pairs where a side hit its token cap (finish_reason "length"); excluded from agreement. */
   truncated: { pairs: number; primary_only: number; target_only: number; both: number };
   /** Judged pairs skipped because a side returned its reasoning channel instead of an answer. `pairs` is the total; the per-side counts say which side leaked (both can). */
@@ -115,6 +118,15 @@ export interface ReasoningLeak {
 
 export type ProjectionConfidence = "low" | "ok";
 
+/** A model the target refused: every listed attempt failed with a rejection (model_not_found, bad_request, unsupported_parameter, auth). */
+export interface Rejected {
+  model: string;
+  target_model: string | null;
+  /** Rejected attempts. */
+  attempts: number;
+  error_type: string;
+}
+
 export interface TargetSummary {
   target: string;
   name?: string;
@@ -123,33 +135,32 @@ export interface TargetSummary {
   pairs: number;
   errors: number;
   error_rate: number | null;
-  unmapped_requests: number;
+  /** Models the target refused outright (see `Rejected`). */
+  rejected: Rejected[];
+  /** Share of mirrored requests the target accepted (did not reject with model_not_found, bad_request, unsupported_parameter or auth). */
   coverage_pct: number | null;
   no_output: PerSide<number>;
-  unpriced: number;
-  unpriced_primary: number;
+  cost_not_reported: PerSide<number>;
   truncated: { pairs: number; primary_only: number; target_only: number; both: number };
   reasoning_leak: ReasoningLeak;
-  /** Projection: primary's full spend on each mapped model, scaled by that model's paired cost ratio, then to 30 days. */
+  /** Projection: primary's full spend on each mirrored model, scaled by that model's paired cost ratio, then to 30 days. */
   projected_monthly_usd: number | null;
   comparable_monthly_usd: number | null;
   delta_usd: number | null;
   delta_pct: number | null;
   projection_confidence: ProjectionConfidence;
-  /** As-served cost over priced pairs across all models (no projection). */
-  measured: CostSplit;
+  /** Reported-or-billed cost over pairs with a cost on both sides, across all models (no projection). */
+  reported: CostSplit;
+  target_cost_origin: CostOrigin | "mixed" | null;
   avg_cost_per_request_usd: PerSide<number | null>;
-  target_cost_cache_neutral_usd: number | null;
-  delta_pct_cache_neutral: number | null;
-  target_cost_price_only_usd: number | null;
-  delta_pct_price_only: number | null;
   cost_complete_pairs: CostSplit;
+  /** Token totals per side over pairs, as each provider reported them. Always present so an agent can take the counts to a provider's current pricing page. */
   tokens: PerSide<TokenTotals>;
   cache_share: PerSide<number | null>;
-  /** Set when one side's cache share exceeds the other's by more than 20 points. */
+  /** Set when one side's cache share exceeds the other's by more than 20 points: the reported delta includes that discount. */
   cache_warning: string | null;
-  /** The number shown first: cache-neutral when the cache warning fires (one side ran warm), otherwise as served. */
-  headline: { delta_pct: number | null; basis: "as_served" | "cache_neutral"; note: string };
+  /** The number shown first: the delta of reported-or-billed costs over pairs with a cost on both sides. null delta when the target has no cost; `note` then explains why and what to do. */
+  headline: { delta_pct: number | null; basis: "as_served"; note: string };
   /** Fraction of completed pairs the judge scored (1 = every pair). */
   judge_fraction: number;
   /** Up to three of the model judge's reasons for DISAGREE verdicts across this target's models. */
@@ -164,9 +175,6 @@ export interface TargetSummary {
   ttft_first_content: PerSide<Quantiles>;
   agreement_rate: number | null;
   agreement_judged: number;
-  gaps: Array<{ model: string; requests: number; suggestion?: string | null }>;
-  /** Mapped models where every attempt failed with a non-transient error: listed by the target but not usable. */
-  failing: Array<{ model: string; target_model: string | null; attempts: number; error_type: string }>;
 }
 
 export interface ReportAggregates {
@@ -182,12 +190,13 @@ export interface ReportAggregates {
     requests_ok: number;
     errors: number;
     no_output: number;
-    unpriced: number;
+    /** Ok responses with no provider-reported cost. */
+    cost_not_reported: number;
+    /** Sum of the costs the primary reported. */
     cost_usd: number;
-    cost_source: "measured" | "computed" | "mixed" | "unknown";
+    cost_source: "reported" | "not_reported" | "mixed";
     avg_cost_per_request_usd: number | null;
     monthly_usd: number;
-    topup_fee_usd: number | null;
     latency: Quantiles;
     /** TTFT over ok, non-empty primary responses that reported one. Labelled by `ttft_method`; not compared with targets here. */
     ttft: Quantiles;
@@ -205,7 +214,6 @@ export interface ReportAggregates {
   target_models: TargetModelStats[];
   method: {
     costs: string;
-    cost_deltas: string;
     complete_pairs: string;
     empty_outputs: string;
     sampling: string;
@@ -214,7 +222,6 @@ export interface ReportAggregates {
     agreement: string;
     judge_model: string | null;
     sample_size_note: string | null;
-    prices: Array<{ target: string; captured?: string; source?: string }>;
   };
 }
 
@@ -245,9 +252,15 @@ export function isEmptyOutput(s: SideResult | undefined): boolean {
   return s.finish_reason === "length" || s.usage?.completion_tokens === 0;
 }
 
-/** A side has a usable cost. Status ok with no cost is "unpriced" and stays out of cost totals. */
-export function isPriced(s: SideResult): boolean {
-  return isNum(s.cost_usd);
+/**
+ * The provider itself reported a cost for this response. `cost_source` "reported" (or the legacy "measured", which
+ * meant the same thing) with a finite `cost_usd`. Legacy "computed" costs came from a price table and are not
+ * provider figures, so they count as not reported.
+ */
+export function isReported(s: SideResult): boolean {
+  if (!isNum(s.cost_usd)) return false;
+  const src = s.cost_source as string | undefined;
+  return src === undefined || src === "reported" || src === "billed" || src === "measured";
 }
 
 /** Finished on its own (stop or tool_calls) and produced something. */
@@ -340,53 +353,53 @@ function sumTokens(sides: SideResult[]): TokenTotals {
 
 const share = (t: TokenTotals): number | null => (t.prompt_tokens > 0 ? t.cached_tokens / t.prompt_tokens : null);
 
-/** Which delta leads: cache-neutral when one side ran from a much warmer prompt cache, else as served. */
-function headlineFor(warning: string | null, asServed: number | null, neutral: number | null): TargetSummary["headline"] {
-  if (warning && neutral !== null) return { delta_pct: neutral, basis: "cache_neutral", note: "cache-neutral: one side was served from a much warmer prompt cache, so the target's cached tokens are priced at its full input rate" };
-  return { delta_pct: asServed, basis: "as_served", note: "as served: what each side actually charged over pairs priced on both sides" };
-}
-
 function cacheWarning(primaryName: string, targetName: string, s: PerSide<number | null>): string | null {
   if (s.primary === null || s.target === null) return null;
   const diff = (s.target - s.primary) * 100;
   if (Math.abs(diff) <= 20) return null;
   const [hi, lo, hiShare, loShare] = diff > 0 ? [targetName, primaryName, s.target, s.primary] : [primaryName, targetName, s.primary, s.target];
-  return `${hi} served ${Math.round(hiShare * 100)}% of prompt tokens from cache vs ${Math.round(loShare * 100)}% on ${lo}; the as-served delta includes that discount. Read the cache-neutral delta instead.`;
+  return `${hi} served ${Math.round(hiShare * 100)}% of prompt tokens from cache vs ${Math.round(loShare * 100)}% on ${lo}; the reported costs include that discount.`;
 }
+
+/** Error types that mean the target refused the request as sent, as opposed to a transient failure. */
+export const REJECTION_TYPES = new Set(["model_not_found", "bad_request", "unsupported_parameter", "auth"]);
 
 export interface AggregateInput {
   records: LogRecord[];
   judgements: JudgeResult[];
   version: string;
   sampleRate: number | null;
-  byok: boolean;
   judgeModel: string | null;
   /** Fraction of completed pairs that were eligible for judging (default 0.25). */
   judgeFraction?: number;
-  targetMeta: Record<string, { name: string; pricesCaptured?: string; pricesSource?: string }>;
-  suggestions?: (target: string, model: string) => string | null;
-  /** Price tables by target id (canonical model -> entry). Defaults to the shipped target files. */
-  priceTables?: Record<string, Record<string, PriceEntry>>;
+  /** Display names and, optionally, a one-line note on why a target carries no cost and what to do about it. */
+  targetMeta: Record<string, { name: string; reportsCost?: boolean; costHint?: string }>;
+  /** Per-request bills by target id, keyed by the provider's request id (USD); joined to pairs by `target_request_id`. */
+  billed?: Record<string, Record<string, number>>;
   /** Clock for `generated_at`; tests pin it. */
   now?: () => Date;
 }
 
-function priceTablesOrShipped(given?: Record<string, Record<string, PriceEntry>>): Record<string, Record<string, PriceEntry>> {
-  if (given) return given;
-  try {
-    const out: Record<string, Record<string, PriceEntry>> = {};
-    for (const t of loadTargets()) out[t.id] = t.models;
-    return out;
-  } catch {
-    return {};
-  }
+/** Shown when a target has no cost and no target-specific note was given. */
+export const NO_COST_NOTE = (target: string) => `${target} did not report a cost per response and no bill was available; RouteArena shows token counts and leaves dollars to you (take the counts to ${target}'s current pricing page).`;
+
+/** The cost a provider gave for a target side: its bill when one is joined by request id, else the cost on its response. */
+function targetCost(side: SideResult, bills: Record<string, number> | undefined): { usd: number; origin: CostOrigin } | null {
+  const rid = (side as SideExt).target_request_id;
+  if (bills && rid && isNum(bills[rid])) return { usd: bills[rid], origin: "billed" };
+  if (isReported(side)) return { usd: side.cost_usd!, origin: "reported" };
+  return null;
+}
+
+function originOf(origins: CostOrigin[]): CostOrigin | "mixed" | null {
+  const set = new Set(origins);
+  return set.size === 0 ? null : set.size === 1 ? [...set][0] : "mixed";
 }
 
 export function aggregate(input: AggregateInput): ReportAggregates {
   const { records } = input;
   const judgeByKey = new Map<string, JudgeResult>();
   for (const j of input.judgements) judgeByKey.set(`${j.record_id}|${j.target}`, j);
-  const prices = priceTablesOrShipped(input.priceTables);
   const primaryProvider = records[0]?.primary.provider ?? "unknown";
   const primaryName = primaryProvider === "openrouter" ? "OpenRouter" : primaryProvider === "openai" ? "OpenAI" : primaryProvider;
 
@@ -408,10 +421,9 @@ export function aggregate(input: AggregateInput): ReportAggregates {
 
   // Primary totals
   const okRecs = records.filter((r) => ok(r.primary));
-  const pricedRecs = okRecs.filter((r) => isPriced(r.primary));
-  const primaryCost = pricedRecs.reduce((s, r) => s + r.primary.cost_usd!, 0);
-  const costSources = new Set(okRecs.map((r) => r.primary.cost_source ?? "unknown").filter((s) => s !== "unknown"));
-  const costSource: ReportAggregates["primary"]["cost_source"] = costSources.size === 0 ? "unknown" : costSources.size === 1 ? ([...costSources][0] as any) : "mixed";
+  const reportedRecs = okRecs.filter((r) => isReported(r.primary));
+  const primaryCost = reportedRecs.reduce((s, r) => s + r.primary.cost_usd!, 0);
+  const costSource: ReportAggregates["primary"]["cost_source"] = okRecs.length === 0 ? "not_reported" : reportedRecs.length === okRecs.length ? "reported" : reportedRecs.length === 0 ? "not_reported" : "mixed";
   const primaryTokens = sumTokens(okRecs.map((r) => r.primary));
   const primaryTtftSides = sideTtftByMethod(okRecs.map((r) => r.primary));
 
@@ -434,7 +446,7 @@ export function aggregate(input: AggregateInput): ReportAggregates {
         completion_tokens: tok.completion_tokens,
         cached_tokens: tok.cached_tokens,
         reasoning_tokens: tok.reasoning_tokens,
-        cost_usd: good.reduce((s, r) => s + (r.primary.cost_usd ?? 0), 0),
+        cost_usd: good.filter((r) => isReported(r.primary)).reduce((s, r) => s + r.primary.cost_usd!, 0),
         latency: quantiles(good.map((r) => r.primary.latency_ms!).filter((x) => x !== undefined)),
         ttft: quantiles(good.filter((r) => !isEmptyOutput(r.primary)).map((r) => sideTtft(r.primary)).filter((v): v is number => v !== null)),
       };
@@ -459,25 +471,23 @@ export function aggregate(input: AggregateInput): ReportAggregates {
   }
   const target_models: TargetModelStats[] = [];
   for (const e of tmMap.values()) {
+    const m = input.billed?.[e.target];
     const paired = e.recs.filter((x) => ok(x.side) && ok(x.rec.primary));
     const errors = e.recs.filter((x) => x.side.status === "error");
-    const unmapped = e.recs.filter((x) => x.side.status === "unmapped").length;
-    const attempted = e.recs.length - unmapped;
+    const attempted = e.recs.length;
     const error_types: Record<string, number> = {};
     for (const x of errors) error_types[x.side.error_type ?? "unknown"] = (error_types[x.side.error_type ?? "unknown"] ?? 0) + 1;
-    const entry: PriceEntry | undefined = prices[e.target]?.[e.model.toLowerCase()];
 
-    // Cost: only pairs priced on both sides. An ok target with no price is "unpriced", never $0.
-    const unpriced = paired.filter((x) => !isPriced(x.side)).length;
-    const unpricedPrimary = paired.filter((x) => !isPriced(x.rec.primary)).length;
-    const priced = paired.filter((x) => isPriced(x.side) && isPriced(x.rec.primary));
-    const pCost = priced.reduce((s, x) => s + x.rec.primary.cost_usd!, 0);
-    const tCost = priced.reduce((s, x) => s + x.side.cost_usd!, 0);
-    const tNeutral = entry ? tCost + priced.reduce((s, x) => s + cacheDiscountUsd(entry, x.side.usage), 0) : null;
-    const tPriceOnly = entry ? priced.reduce((s, x) => s + (computeCost(entry, x.rec.primary.usage) ?? 0), 0) : null;
-    const complete = priced.filter((x) => isComplete(x.rec.primary) && isComplete(x.side));
-    const cpP = complete.reduce((s, x) => s + x.rec.primary.cost_usd!, 0);
-    const cpT = complete.reduce((s, x) => s + x.side.cost_usd!, 0);
+    // Cost: only pairs where both providers reported a cost. An ok side with no reported cost is counted, never $0.
+    const withCost = paired.map((x) => ({ ...x, p: isReported(x.rec.primary) ? x.rec.primary.cost_usd! : null, t: targetCost(x.side, m) }));
+    const tNotReported = withCost.filter((x) => x.t === null).length;
+    const pNotReported = withCost.filter((x) => x.p === null).length;
+    const costed = withCost.filter((x): x is typeof x & { p: number; t: { usd: number; origin: CostOrigin } } => x.p !== null && x.t !== null);
+    const pCost = costed.reduce((s, x) => s + x.p, 0);
+    const tCost = costed.reduce((s, x) => s + x.t.usd, 0);
+    const complete = costed.filter((x) => isComplete(x.rec.primary) && isComplete(x.side));
+    const cpP = complete.reduce((s, x) => s + x.p, 0);
+    const cpT = complete.reduce((s, x) => s + x.t.usd, 0);
     const tokens: PerSide<TokenTotals> = { primary: sumTokens(paired.map((x) => x.rec.primary)), target: sumTokens(paired.map((x) => x.side)) };
 
     // agreement
@@ -540,24 +550,19 @@ export function aggregate(input: AggregateInput): ReportAggregates {
     target_models.push({
       target: e.target,
       model: e.model,
-      target_model: e.recs.find((x) => x.side.status !== "unmapped")?.side.model ?? null,
+      target_model: e.recs.find((x) => x.side.model)?.side.model ?? null,
       pairs: paired.length,
       requests_mirrored: e.recs.length,
       errors: errors.length,
       error_rate: attempted > 0 ? errors.length / attempted : null,
       error_types,
-      unmapped,
       no_output: { primary: paired.filter((x) => isEmptyOutput(x.rec.primary)).length, target: paired.filter((x) => isEmptyOutput(x.side)).length },
-      unpriced,
-      unpriced_primary: unpricedPrimary,
-      cost_pairs: priced.length,
+      cost_not_reported: { primary: pNotReported, target: tNotReported },
+      cost_pairs: costed.length,
       primary_cost_usd: pCost,
       target_cost_usd: tCost,
       delta_pct: pct(tCost, pCost),
-      target_cost_cache_neutral_usd: tNeutral,
-      delta_pct_cache_neutral: pct(tNeutral, pCost),
-      target_cost_price_only_usd: tPriceOnly,
-      delta_pct_price_only: pct(tPriceOnly, pCost),
+      target_cost_origin: originOf(costed.map((x) => x.t.origin)),
       cost_complete_pairs: { pairs: complete.length, primary_cost_usd: cpP, target_cost_usd: cpT, delta_pct: pct(cpT, cpP) },
       tokens,
       cache_share: { primary: share(tokens.primary), target: share(tokens.target) },
@@ -570,7 +575,7 @@ export function aggregate(input: AggregateInput): ReportAggregates {
       ttft_first_byte: { primary: pSides.first_byte, target: tSides.first_byte },
       ttft_first_content: { primary: pSides.first_content, target: tSides.first_content },
       agreement: judged > 0 ? { judged, agreed, rate: agreed / judged, exact, json, numeric, llm } : null,
-      tool_calls: toolPairs.length ? { pairs: toolPairs.length, valid_json, name_match } : null,
+      tool_call_stats: toolPairs.length ? { pairs: toolPairs.length, valid_json, name_match } : null,
       truncated: trunc,
       reasoning_leak: leak,
       disagreement_reasons: disagreementReasons,
@@ -584,20 +589,32 @@ export function aggregate(input: AggregateInput): ReportAggregates {
   const targets: TargetSummary[] = [];
   for (const t of [...targetsSeen].sort()) {
     const tms = target_models.filter((x) => x.target === t);
+    const meta = input.targetMeta[t];
+    const name = meta?.name;
+    const label = name ?? t;
     const allSides = records.flatMap((r) => r.targets.filter((s) => s.provider === t).map((s) => ({ r, s })));
     const vias = new Set(allSides.map((x) => x.s.via).filter(Boolean));
     const mirrored = allSides.length;
-    const unmappedReq = allSides.filter((x) => x.s.status === "unmapped").length;
     const pairs = tms.reduce((s, x) => s + x.pairs, 0);
     const errors = tms.reduce((s, x) => s + x.errors, 0);
-    const attempted = mirrored - unmappedReq;
-    // Projection: for each model with priced pairs, scale the primary's full spend on that model by the paired cost ratio.
+    // Rejections: the target refused the request as sent. Listed per model; coverage is the share of mirrored requests not rejected.
+    const rejectedSides = allSides.filter((x) => x.s.status === "error" && REJECTION_TYPES.has(x.s.error_type ?? ""));
+    const rejected: Rejected[] = tms
+      .map((x) => {
+        const rej = Object.entries(x.error_types).filter(([k]) => REJECTION_TYPES.has(k));
+        const attempts = rej.reduce((s, [, v]) => s + v, 0);
+        if (!attempts) return null;
+        return { model: x.model, target_model: x.target_model, attempts, error_type: rej.sort((a, b) => b[1] - a[1])[0][0] };
+      })
+      .filter((x): x is Rejected => x !== null)
+      .sort((a, b) => b.attempts - a.attempts);
+    // Projection: for each model with costed pairs, scale the primary's full spend on that model by the paired cost ratio.
     let projected = 0;
     let comparable = 0;
     for (const tm of tms) {
       if (tm.cost_pairs === 0 || tm.primary_cost_usd <= 0) continue;
       const ratio = tm.target_cost_usd / tm.primary_cost_usd;
-      const modelTotal = models.find((m) => m.model === tm.model)?.cost_usd ?? 0;
+      const modelTotal = models.find((mm) => mm.model === tm.model)?.cost_usd ?? 0;
       projected += modelTotal * ratio;
       comparable += modelTotal;
     }
@@ -605,13 +622,6 @@ export function aggregate(input: AggregateInput): ReportAggregates {
     const costPairs = sum((x) => x.cost_pairs);
     const pCost = sum((x) => x.primary_cost_usd);
     const tCost = sum((x) => x.target_cost_usd);
-    // Cache-neutral and price-only: only rows where the recomputation was possible, compared with the primary cost of those same rows.
-    const withNeutral = tms.filter((x) => x.target_cost_cache_neutral_usd !== null);
-    const withPriceOnly = tms.filter((x) => x.target_cost_price_only_usd !== null);
-    const tNeutral = withNeutral.length ? withNeutral.reduce((s, x) => s + x.target_cost_cache_neutral_usd!, 0) : null;
-    const pNeutralBase = withNeutral.reduce((s, x) => s + x.primary_cost_usd, 0);
-    const tPriceOnly = withPriceOnly.length ? withPriceOnly.reduce((s, x) => s + x.target_cost_price_only_usd!, 0) : null;
-    const pPriceOnlyBase = withPriceOnly.reduce((s, x) => s + x.primary_cost_usd, 0);
     const cpPairs = sum((x) => x.cost_complete_pairs.pairs);
     const cpP = sum((x) => x.cost_complete_pairs.primary_cost_usd);
     const cpT = sum((x) => x.cost_complete_pairs.target_cost_usd);
@@ -622,21 +632,26 @@ export function aggregate(input: AggregateInput): ReportAggregates {
     const cache_share = { primary: share(tokens.primary), target: share(tokens.target) };
     const pairedSides = records.flatMap((r) => (ok(r.primary) ? r.targets.filter((s) => s.provider === t && ok(s)).map((s) => ({ primary: r.primary, target: s })) : []));
     const ttft = comparableTtft(pairedSides);
-    const methods = new Set(tms.map((x) => x.ttft_method).filter((m): m is TtftMethod => m !== null));
+    const methods = new Set(tms.map((x) => x.ttft_method).filter((mm): mm is TtftMethod => mm !== null));
     const tSides = sideTtftByMethod(allSides.map((x) => x.s));
     const pSides = sideTtftByMethod(pairedSides.map((x) => x.primary));
     const agreementJudged = tms.reduce((s, x) => s + (x.agreement?.judged ?? 0), 0);
     const agreementAgreed = tms.reduce((s, x) => s + (x.agreement?.agreed ?? 0), 0);
-    const gaps = tms
-      .filter((x) => x.unmapped > 0)
-      .map((x) => ({ model: x.model, requests: x.unmapped, suggestion: input.suggestions?.(t, x.model) ?? null }))
-      .sort((a, b) => b.requests - a.requests);
-    const NON_TRANSIENT = new Set(["model_not_found", "bad_request", "unsupported_parameter", "auth"]);
-    const failing = tms
-      .filter((x) => x.pairs === 0 && x.errors >= 2 && x.errors === x.requests_mirrored - x.unmapped && Object.keys(x.error_types).every((e) => NON_TRANSIENT.has(e)))
-      .map((x) => ({ model: x.model, target_model: x.target_model, attempts: x.errors, error_type: Object.keys(x.error_types).sort((a, b) => x.error_types[b] - x.error_types[a])[0] }))
-      .sort((a, b) => b.attempts - a.attempts);
-    const name = input.targetMeta[t]?.name;
+
+    const perPairDelta = pct(tCost, pCost);
+    const targetOrigin = originOf(tms.flatMap((x) => (x.target_cost_origin === "mixed" ? (["reported", "billed"] as CostOrigin[]) : x.target_cost_origin ? [x.target_cost_origin] : [])));
+    const headline: TargetSummary["headline"] = {
+      delta_pct: perPairDelta,
+      basis: "as_served",
+      note:
+        costPairs > 0
+          ? `${targetOrigin === "billed" ? "billed" : targetOrigin === "mixed" ? "reported or billed" : "reported"} costs over ${costPairs} pair${costPairs === 1 ? "" : "s"} where both sides have a cost`
+          : pairs === 0
+            ? `no completed pairs on ${label}`
+            : sum((x) => x.cost_not_reported.target) > 0
+              ? meta?.costHint ?? NO_COST_NOTE(label)
+              : `${primaryName} did not report a cost for these requests.`,
+    };
     targets.push({
       target: t,
       name,
@@ -644,12 +659,11 @@ export function aggregate(input: AggregateInput): ReportAggregates {
       requests_mirrored: mirrored,
       pairs,
       errors,
-      error_rate: attempted > 0 ? errors / attempted : null,
-      unmapped_requests: unmappedReq,
-      coverage_pct: mirrored > 0 ? ((mirrored - unmappedReq) / mirrored) * 100 : null,
+      error_rate: mirrored > 0 ? errors / mirrored : null,
+      rejected,
+      coverage_pct: mirrored > 0 ? ((mirrored - rejectedSides.length) / mirrored) * 100 : null,
       no_output: { primary: sum((x) => x.no_output.primary), target: sum((x) => x.no_output.target) },
-      unpriced: sum((x) => x.unpriced),
-      unpriced_primary: sum((x) => x.unpriced_primary),
+      cost_not_reported: { primary: sum((x) => x.cost_not_reported.primary), target: sum((x) => x.cost_not_reported.target) },
       truncated: { pairs: sum((x) => x.truncated.pairs), primary_only: sum((x) => x.truncated.primary_only), target_only: sum((x) => x.truncated.target_only), both: sum((x) => x.truncated.both) },
       reasoning_leak: { pairs: sum((x) => x.reasoning_leak.pairs), primary: sum((x) => x.reasoning_leak.primary), target: sum((x) => x.reasoning_leak.target) },
       projected_monthly_usd: comparable > 0 ? projected * monthlyFactor : null,
@@ -657,17 +671,14 @@ export function aggregate(input: AggregateInput): ReportAggregates {
       delta_usd: comparable > 0 ? (projected - comparable) * monthlyFactor : null,
       delta_pct: comparable > 0 ? ((projected - comparable) / comparable) * 100 : null,
       projection_confidence: shortSpan || pairs < 50 ? "low" : "ok",
-      measured: { pairs: costPairs, primary_cost_usd: pCost, target_cost_usd: tCost, delta_pct: pct(tCost, pCost) },
+      reported: { pairs: costPairs, primary_cost_usd: pCost, target_cost_usd: tCost, delta_pct: perPairDelta },
+      target_cost_origin: targetOrigin,
       avg_cost_per_request_usd: { primary: costPairs > 0 ? pCost / costPairs : null, target: costPairs > 0 ? tCost / costPairs : null },
-      target_cost_cache_neutral_usd: tNeutral,
-      delta_pct_cache_neutral: pct(tNeutral, pNeutralBase),
-      target_cost_price_only_usd: tPriceOnly,
-      delta_pct_price_only: pct(tPriceOnly, pPriceOnlyBase),
       cost_complete_pairs: { pairs: cpPairs, primary_cost_usd: cpP, target_cost_usd: cpT, delta_pct: pct(cpT, cpP) },
       tokens,
       cache_share,
-      cache_warning: cacheWarning(primaryName, name ?? t, cache_share),
-      headline: headlineFor(cacheWarning(primaryName, name ?? t, cache_share), pct(tCost, pCost), pct(tNeutral, pNeutralBase)),
+      cache_warning: cacheWarning(primaryName, label, cache_share),
+      headline,
       judge_fraction: input.judgeFraction ?? 0.25,
       disagreement_reasons: [...new Set(tms.flatMap((x) => x.disagreement_reasons ?? []))].slice(0, 3),
       latency: quantiles(allSides.filter((x) => ok(x.s)).map((x) => x.s.latency_ms!)),
@@ -679,8 +690,6 @@ export function aggregate(input: AggregateInput): ReportAggregates {
       ttft_first_content: { primary: pSides.first_content, target: tSides.first_content },
       agreement_rate: agreementJudged > 0 ? agreementAgreed / agreementJudged : null,
       agreement_judged: agreementJudged,
-      gaps,
-      failing,
     });
   }
 
@@ -689,8 +698,7 @@ export function aggregate(input: AggregateInput): ReportAggregates {
   const notSampled = skipped["not_sampled"] ?? 0;
   const sampleRate = mirroredCount + notSampled > 0 ? mirroredCount / (mirroredCount + notSampled) : input.sampleRate;
   const monthly = primaryCost * monthlyFactor;
-  const isOpenRouter = primaryProvider === "openrouter";
-  const maxPairs = targets.reduce((m, t) => Math.max(m, t.pairs), 0);
+  const maxPairs = targets.reduce((mx, t) => Math.max(mx, t.pairs), 0);
   const fewPairs = (targets.length ? maxPairs : okRecs.length) < 50;
   const confidence: ProjectionConfidence = shortSpan || fewPairs ? "low" : "ok";
   const confidenceReason = confidence === "ok" ? null : [shortSpan ? `the log spans ${spanText.replace(" of traffic", "")}` : null, fewPairs ? `only ${targets.length ? maxPairs : okRecs.length} ${targets.length ? "pairs" : "requests"} (under 50)` : null].filter(Boolean).join(" and ");
@@ -713,12 +721,11 @@ export function aggregate(input: AggregateInput): ReportAggregates {
       requests_ok: okRecs.length,
       errors: records.length - okRecs.length,
       no_output: primaryEmpty,
-      unpriced: okRecs.length - pricedRecs.length,
+      cost_not_reported: okRecs.length - reportedRecs.length,
       cost_usd: primaryCost,
       cost_source: costSource,
-      avg_cost_per_request_usd: pricedRecs.length ? primaryCost / pricedRecs.length : null,
+      avg_cost_per_request_usd: reportedRecs.length ? primaryCost / reportedRecs.length : null,
       monthly_usd: monthly,
-      topup_fee_usd: isOpenRouter && !input.byok ? monthly * OPENROUTER_TOPUP_FEE : null,
       latency: quantiles(okRecs.map((r) => r.primary.latency_ms!)),
       ttft: quantiles(okRecs.filter((r) => !isEmptyOutput(r.primary)).map((r) => sideTtft(r.primary)).filter((v): v is number => v !== null)),
       ttft_method: dominantMethod(okRecs.map((r) => r.primary)),
@@ -735,28 +742,22 @@ export function aggregate(input: AggregateInput): ReportAggregates {
     target_models,
     method: {
       costs:
-        (costSource === "measured"
-          ? `${primaryName} costs are measured (usage.cost returned by ${primaryName}). Target costs are computed from each target's public price table using the token counts the target reported.`
-          : `${primaryName} costs are computed from a checked-in price table using reported token counts. Target costs are computed the same way from each target's public price table.`) +
-        " Cost figures cover only pairs where both sides returned a response and both have a price; a target response with no price-table entry is counted as unpriced, not as $0, and the pair stays in latency and error counts.",
-      cost_deltas:
-        "Three deltas are shown per model, all against the same primary cost. As served: what the target charged for its own response, with its own output length and cache hits. Cache-neutral: the target's cached prompt tokens re-priced at its full input rate, so a cache hit on one side does not pose as a price difference. Price-only: the target's price table applied to the primary's own token counts (prompt, completion and cached), which isolates the price list from how much each model chose to write.",
+        "Costs are what each provider reported or billed: OpenRouter's usage.cost on the response; for TokenRouter, its own bill for the free-credit key, read by the relay and joined by request id. RouteArena computes no prices and ships none. Cost totals cover only pairs with a cost on both sides; a side without one is counted as cost_not_reported, not as $0, and stays in latency, error, token and agreement counts. Token counts per side are always listed.",
       complete_pairs:
-        "Complete-pairs cost repeats the as-served delta over only the pairs where both sides finished on their own (finish_reason stop or tool_calls) and neither returned an empty response, so a side that was cut off at its token cap or returned nothing cannot lower or raise its bill.",
+        "Complete-pairs cost repeats the reported delta over only the pairs where both sides finished on their own (finish_reason stop or tool_calls) and neither returned an empty response, so a side that was cut off at its token cap or returned nothing cannot lower or raise its bill.",
       empty_outputs:
-        "An empty output is a response with status ok that carried no content and no tool calls (typically the whole token cap was spent on reasoning). Counted separately as no_output per side; excluded from TTFT on both sides, from agreement, and from complete-pairs cost. Older logs without the flag use finish_reason length with no text, or zero completion tokens. A reasoning leak is different: a response with status ok whose content is the model's reasoning channel (an \"analysis\" object or harmony-format text) rather than an answer; such pairs are counted as reasoning_leak per side, billed as served, and skipped by the judge.",
+        "An empty output is a status-ok response with no content and no tool calls, usually because the whole token cap went to reasoning. Counted per side as no_output; excluded from TTFT on both sides, from agreement and from complete-pairs cost (older logs: finish_reason length with no text). A reasoning leak is a status-ok response whose content is the model's reasoning channel instead of an answer; counted per side as reasoning_leak, billed as reported, skipped by the judge.",
       sampling: sampleRate === null ? "Sampling rate unknown." : `${Math.round(sampleRate * 100)}% of eligible requests were mirrored (measured from the log). Requests with images, more than the input-token cap, or n>1 were not eligible.`,
       ttft:
         "TTFT is compared only when both sides were measured the same way: first content token on both when available, otherwise the legacy value when both sides recorded the same method, otherwise first byte on both. Pairs measured differently are reported as not comparable rather than compared. Per-side first-byte and first-content quantiles are listed separately. Streaming requests only; empty responses excluded.",
       projection:
         shortSpan
-          ? `Monthly figures scale ${spanText} to 30 days (span floored at 1 hour). Per-request averages and measured totals are the reliable numbers here; the monthly figure is a rough extrapolation.`
+          ? `Monthly figures scale ${spanText} to 30 days (span floored at 1 hour). Per-request averages and reported totals are the reliable numbers here; the monthly figure is a rough extrapolation.`
           : `Monthly figures scale ${period?.days ?? 0} calendar days to 30 days.${confidence === "low" ? " Few pairs were measured, so the monthly figure is a rough extrapolation." : ""}`,
       agreement:
-        `Agreement is scored on a ${Math.round(judgeFraction * 100)}% sample of completed pairs, excluding pairs where either side stopped at its token cap, returned nothing, or returned its reasoning channel instead of an answer (those are counted as truncated, no_output or reasoning_leak instead). Short outputs and plain numbers are compared exactly; JSON outputs are scored by field-weighted similarity, where arrays compare as multisets, empty values (null, "", [], {}) count as equal, and long strings earn partial credit for near matches: a similarity of 0.85 or more counts as agreement, under 0.5 as disagreement; anything in between, and free text, is judged by a cheap model asked whether the two answers are equivalent. ${judgeFraction >= 1 ? "Every completed pair was judged." : "Sampled, not exhaustive."} Agreement is noisy by nature: the same route asked the same prompt twice at temperature 0 does not always agree with itself (measured 2026-11-08: about half the time on JSON extraction with reasoning models), so compare targets against each other and read the judge's reasons rather than expecting 100%.`,
+        `Agreement is scored on a ${Math.round(judgeFraction * 100)}% sample of completed pairs, excluding pairs that were truncated, empty, or a leaked reasoning channel. Short outputs must match exactly; JSON is scored by field-weighted similarity (arrays as multisets; null, "", [] and {} equal; partial credit for near-identical long strings): 0.85 or more agrees, under 0.5 disagrees, in between a cheap model judges and says why. ${judgeFraction >= 1 ? "Every completed pair was judged." : "Sampled."} A router asked twice does not always agree with itself; compare routers, not against 100%.`,
       judge_model: input.judgeModel,
-      sample_size_note: confidence === "low" ? `Projection confidence is low: ${confidenceReason}. Read per-request averages and measured totals; the monthly figure is a rough extrapolation.` : null,
-      prices: Object.entries(input.targetMeta).map(([target, m]) => ({ target, captured: m.pricesCaptured, source: m.pricesSource })),
+      sample_size_note: confidence === "low" ? `Projection confidence is low: ${confidenceReason}. Read per-request averages and reported totals; the monthly figure is a rough extrapolation.` : null,
     },
   };
 }

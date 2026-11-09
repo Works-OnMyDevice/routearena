@@ -55,6 +55,6 @@ export function magicLinkEmail(link: string, budget: number, days: number): stri
 <p><a href="${link}" style="display:inline-block;background:#2a4d9b;color:#fff;text-decoration:none;padding:10px 16px;border-radius:6px">Activate credits</a></p>
 <p style="color:#6b6b6b;font-size:13px">If the button does not work, open this URL:<br>${link}</p>
 <p style="color:#6b6b6b;font-size:13px">You asked for this from the <code>routearena init --free-credits</code> command. If you did not, ignore this email. The link expires in one hour.</p>
-<p style="color:#6b6b6b;font-size:12px">RouteArena is an independent open-source tool (github.com/Works-OnMyDevice/routearena). It compares LLM providers; TokenRouter is one of six targets. The relay never sees your prompts in key mode and never stores them in any mode.</p>
+<p style="color:#6b6b6b;font-size:12px">RouteArena is an independent open-source tool (github.com/Works-OnMyDevice/routearena). It compares LLM providers; TokenRouter is one of six targets. You receive a dedicated TokenRouter key capped at the budget; your requests go straight to TokenRouter and the relay never sees them.</p>
 </body></html>`;
 }

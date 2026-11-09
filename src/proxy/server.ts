@@ -68,6 +68,7 @@ export async function startProxy(opts: ProxyOptions): Promise<RunningProxy> {
       maxInputTokens: cfg.maxInputTokens ?? 32_000,
       mirrorImages: cfg.mirrorImages ?? false,
       timeoutMs: opts.mirrorTimeoutMs,
+      modelMap: cfg.model_map,
     },
     logger,
   );

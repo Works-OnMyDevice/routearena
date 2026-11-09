@@ -1,9 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { PRIMARIES, type PrimaryId } from "../config.js";
-import { getTarget } from "../targets/index.js";
-import { canonicalModel, computeCost, mapModel } from "../targets/mapping.js";
+import { canonicalModel } from "../targets/mapping.js";
 import type { SideResult } from "./logger.js";
-import { SseParser, StreamAccumulator, classifyError, classifyInBodyError, extractFromJson, inBodyErrorMessage, isEmptyOutput, round } from "./openaiCall.js";
+import { SseParser, StreamAccumulator, classifyError, classifyInBodyError, costOf, extractFromJson, inBodyErrorMessage, isEmptyOutput, round } from "./openaiCall.js";
 
 /** Default upstream timeout for the primary. Mirrors use the same value unless configured, so timeouts are like-for-like. */
 export const DEFAULT_TIMEOUT_MS = 600_000;
@@ -51,7 +50,6 @@ export async function forwardChat(
   const p = PRIMARIES[primary];
   const stream = body.stream === true;
   const model = String(body.model ?? "");
-  const canonical = canonicalModel(primary, model);
   const outBody = { ...body };
   if (opts.injectUsage && stream) {
     outBody.stream_options = { ...(body.stream_options ?? {}), include_usage: true };
@@ -102,7 +100,8 @@ export async function forwardChat(
         error_type: classifyError(undefined, err),
         error: msg,
         stream,
-        cost_source: "unknown",
+        cost_usd: null,
+        cost_source: "not_reported",
       },
     };
   }
@@ -121,7 +120,8 @@ export async function forwardChat(
     status: upstream.ok ? "ok" : "error",
     http_status: upstream.status,
     stream,
-    cost_source: "unknown",
+    cost_usd: null,
+    cost_source: "not_reported",
   };
 
   if (!upstream.body) {
@@ -227,22 +227,9 @@ export async function forwardChat(
     }
   }
 
-  // Cost
-  if (side.usage) {
-    if (primary === "openrouter" && typeof side.usage.cost === "number") {
-      side.cost_usd = side.usage.cost;
-      side.cost_source = "measured";
-    } else {
-      const table = getTarget(primary === "openai" ? "openai" : "openrouter");
-      const m = table ? mapModel(table, canonical) : null;
-      if (m) {
-        side.cost_usd = computeCost(m.entry, side.usage);
-        side.cost_source = "computed";
-      }
-    }
-  }
-  // No usage (or no price entry) means unpriced, never free: keep cost_usd null so the report treats it as unknown.
-  if (side.cost_source === "unknown" && side.status === "ok") side.cost_usd = null;
+  // Cost: only what the primary itself reported (OpenRouter puts `usage.cost` on the response; OpenAI reports
+  // none). RouteArena ships no price table, so a missing cost stays null and the report treats it as unpriced.
+  Object.assign(side, costOf(side.usage));
   return { side, completed: side.status === "ok" };
 }
 

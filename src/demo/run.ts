@@ -10,6 +10,9 @@ export interface WorkloadItem {
   template: string;
   /** Source page URL (public). */
   source_url: string;
+  /** When the page text was captured. */
+  fetched_at?: string;
+  /** Model id to send, as the primary expects it. Supplied by the agent (`--models`), never by the workload file. */
   model: string;
   messages: Array<{ role: string; content: string }>;
   response_format?: { type: string };
@@ -19,21 +22,39 @@ export interface WorkloadItem {
   reasoning_effort?: string;
 }
 
+/** A workload line before a model is assigned. The file ships prompts only; RouteArena ships no model lists. */
+export type WorkloadPrompt = Omit<WorkloadItem, "model">;
+
 export function workloadPath(): string {
   return path.join(pkgRoot(), "demo", "workload.jsonl");
 }
 
-export async function loadWorkload(file = workloadPath()): Promise<WorkloadItem[]> {
+/** Read demo/workload.jsonl. Items carry no model; any `model` key in the file is ignored. Use assignModels(). */
+export async function loadWorkload(file = workloadPath()): Promise<WorkloadPrompt[]> {
   if (!fs.existsSync(file)) {
     throw new CliError(`Demo workload not found at ${file}.`, "Reinstall routearena (npm i -g routearena@latest) or run from a full clone with demo/workload.jsonl present.");
   }
-  const items: WorkloadItem[] = [];
+  const items: WorkloadPrompt[] = [];
   const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
-    items.push(JSON.parse(line));
+    const { model: _ignored, ...rest } = JSON.parse(line) as WorkloadPrompt & { model?: unknown };
+    void _ignored;
+    items.push(rest);
   }
   return items;
+}
+
+/**
+ * Round-robin the agent-supplied model ids over the workload: item i gets models[i % models.length].
+ * Returns new items; the input is not modified.
+ */
+export function assignModels(items: WorkloadPrompt[], models: string[]): WorkloadItem[] {
+  const ids = models.map((m) => m.trim()).filter(Boolean);
+  if (ids.length === 0) {
+    throw new CliError("No models given for the demo.", "Pass the model ids to send with --models, e.g. --models openai/gpt-4o-mini,deepseek/deepseek-chat (RouteArena ships no model list).");
+  }
+  return items.map((it, i) => ({ ...it, model: ids[i % ids.length] }));
 }
 
 export interface DemoRunResult {
@@ -54,7 +75,8 @@ export const CREDIT_RETRY_DELAYS_MS = [3000, 6000, 12000];
 
 /**
  * Send workload items through the local proxy at `proxyBase` (e.g. http://localhost:4000/v1).
- * The model in each item is an OpenRouter id; for an OpenAI primary the "openai/" prefix is stripped.
+ * Each item's model is whatever the agent assigned (assignModels). For an OpenAI primary a leading "openai/"
+ * (OpenRouter style) is stripped so either spelling works; nothing else is rewritten.
  */
 export async function runDemo(
   items: WorkloadItem[],
@@ -91,16 +113,7 @@ export async function runDemo(
     while (i < items.length && !halted) {
       const it = items[i++];
       let model = it.model;
-      if (opts.primary === "openai") {
-        if (!model.startsWith("openai/")) {
-          // Only OpenAI models can run on an OpenAI primary.
-          done++;
-          result.failed++;
-          opts.onProgress?.(done, items.length, result.ok);
-          continue;
-        }
-        model = model.slice("openai/".length);
-      }
+      if (opts.primary === "openai" && model.startsWith("openai/")) model = model.slice("openai/".length);
       result.sent++;
       result.by_model[it.model] = (result.by_model[it.model] ?? 0) + 1;
       const send = () =>

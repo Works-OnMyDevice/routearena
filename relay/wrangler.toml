@@ -17,15 +17,14 @@ bindings = [{ name = "RELAY", class_name = "RelayState" }]
 tag = "v1"
 new_sqlite_classes = ["RelayState"]
 
-# Non-secret configuration. Secrets (TOKENROUTER_MASTER_KEY, TOKENROUTER_MANAGEMENT_KEY, HMAC_SECRET, ADMIN_SECRET,
-# RESEND_API_KEY, ALERT_EMAIL, MAIL_FROM) are set with `wrangler secret put` and never live in this file.
+# Non-secret configuration. Secrets (TOKENROUTER_MANAGEMENT_KEY, HMAC_SECRET, ADMIN_SECRET, RESEND_API_KEY,
+# ALERT_EMAIL, MAIL_FROM) are set with `wrangler secret put` and never live in this file.
+# The relay ships no price table and computes no prices: PER_CLAIM_USD is the quota TokenRouter enforces per key,
+# MAX_ISSUED_KEYS is a ceiling on how many pool keys may ever be handed out.
 [vars]
 TOKENROUTER_BASE_URL = "https://api.tokenrouter.com"
 PUBLIC_BASE_URL = "https://routearena-api.routearena-api.workers.dev"
 PER_CLAIM_USD = "1"
-GLOBAL_CAP_USD = "300"
+MAX_ISSUED_KEYS = "300"
 CLAIM_DAYS = "7"
 CLAIMS_ENABLED = "true"
-RELAY_ENABLED = "true"
-RELAY_MAX_TOKENS = "2048"
-RELAY_RPM = "60"

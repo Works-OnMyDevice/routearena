@@ -2,9 +2,9 @@
 import type { ReportAggregates, Quantiles, TargetModelStats, TargetSummary } from "./reportTypes";
 
 /**
- * Static report page. No external assets, no scripts beyond none. Works in light and dark system
- * themes and on a phone. Shared verbatim with the relay (relay/lib/reportHtml.ts is a copy made by
- * scripts/sync-relay.mjs), so keep this file dependency-free.
+ * Static report page. No external assets, no scripts. Works in light and dark system themes and on a phone.
+ * Shared verbatim with the relay (relay/lib/reportHtml.ts is a copy made by scripts/sync-relay.mjs), so keep this
+ * file dependency-free. Every cost shown here is a number a provider reported; the page computes no prices.
  */
 
 const esc = (s: unknown): string =>
@@ -25,6 +25,7 @@ const fmtInt = (n: number | null | undefined): string => (n === null || n === un
 const q = (x: Quantiles | undefined): string => (!x || x.n === 0 ? "–" : `${fmtMs(x.p50)} / ${fmtMs(x.p95)}`);
 const share = (s: number | null | undefined): string => (s === null || s === undefined ? "–" : `${Math.round(s * 100)}%`);
 const methodLabel = (m: string | null | undefined): string => (m === "first-content" ? "first content token" : m === "first-byte" ? "first byte" : m === "mixed" ? "mixed methods" : "not comparable");
+const originLabel = (o: string | null | undefined): string => (o === "billed" ? "billed by the target, read via the relay" : o === "mixed" ? "costs on the responses and bills read via the relay" : "costs on the responses");
 
 /** "served by" line under a model: which upstream hosts each router reported. Only routers that name a host show up. */
 function upstreamNote(tm: { primary_upstreams?: Record<string, number>; target_upstreams?: Record<string, number> }, primaryName: string): string {
@@ -59,41 +60,61 @@ function ttftSides(x: { ttft_first_byte?: { primary: Quantiles; target: Quantile
   return parts.length ? `<div class="muted small">${parts.join("; ")}</div>` : "";
 }
 
+/** Tokens per side over pairs: in / out, with reasoning and cache share when either side reported them. */
+function tokensLine(x: { tokens?: { primary: { prompt_tokens: number; completion_tokens: number; reasoning_tokens: number }; target: { prompt_tokens: number; completion_tokens: number; reasoning_tokens: number } }; cache_share?: { primary: number | null; target: number | null } }, primaryName: string): string {
+  const tok = x.tokens;
+  if (!tok) return "–";
+  const reasoning = tok.primary.reasoning_tokens || tok.target.reasoning_tokens ? `; reasoning ${fmtInt(tok.primary.reasoning_tokens)} / ${fmtInt(tok.target.reasoning_tokens)}` : "";
+  const cache = x.cache_share && (x.cache_share.primary || x.cache_share.target) ? `; cached ${share(x.cache_share.primary)} / ${share(x.cache_share.target)}` : "";
+  return `in ${fmtInt(tok.primary.prompt_tokens)} / ${fmtInt(tok.target.prompt_tokens)}, out ${fmtInt(tok.primary.completion_tokens)} / ${fmtInt(tok.target.completion_tokens)}${reasoning}${cache} <span class="muted small">(${esc(primaryName)} / target, as each reported)</span>`;
+}
+
 function targetCard(t: TargetSummary, a: ReportAggregates, primaryName: string): string {
   const name = t.name ?? t.target;
   const low = (t.projection_confidence ?? a.projection?.confidence) === "low";
-  const m = t.measured;
+  const r = t.reported;
   const noOut = t.no_output ?? { primary: 0, target: 0 };
   const tr = t.truncated ?? { pairs: 0, primary_only: 0, target_only: 0, both: 0 };
   const cp = t.cost_complete_pairs;
   const leak = t.reasoning_leak ?? { pairs: 0, primary: 0, target: 0 };
-  const h = t.headline ?? { delta_pct: t.delta_pct, basis: "as_served" as const, note: "" };
+  const nr = t.cost_not_reported ?? { primary: 0, target: 0 };
+  const h = t.headline;
   const jf = t.judge_fraction ?? 0.25;
   const reasons = t.disagreement_reasons ?? [];
-  const subline =
-    t.projected_monthly_usd === null
-      ? "no priced pairs"
-      : low
-        ? `${fmtUsd(m?.target_cost_usd)} vs ${fmtUsd(m?.primary_cost_usd)} on ${esc(primaryName)} measured over ${fmtInt(m?.pairs)} priced pair${m?.pairs === 1 ? "" : "s"}; rough extrapolation ${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)}`
-        : `${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)} on ${esc(primaryName)} for the mirrored models`;
+  const rejected = t.rejected ?? [];
+  const billed = t.target_cost_origin === "billed";
+  // Cost line: pairs with a cost on both sides, else what was not reported and what to do about it.
+  let costLine: string;
+  let costKind: string;
+  if (r && r.pairs > 0) {
+    costKind = `${billed ? "billed" : "reported"} cost delta over ${fmtInt(r.pairs)} pair${r.pairs === 1 ? "" : "s"} (${esc(originLabel(t.target_cost_origin))})`;
+    costLine =
+      t.projected_monthly_usd === null
+        ? `${fmtUsd(r.target_cost_usd)} ${billed ? "billed by" : "reported by"} ${esc(name)} vs ${fmtUsd(r.primary_cost_usd)} reported by ${esc(primaryName)}`
+        : low
+          ? `${fmtUsd(r.target_cost_usd)} vs ${fmtUsd(r.primary_cost_usd)} on ${esc(primaryName)}, both as ${billed ? "billed or reported" : "reported"} over ${fmtInt(r.pairs)} pair${r.pairs === 1 ? "" : "s"}; rough extrapolation ${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)}`
+          : `${fmtUsd(t.projected_monthly_usd)} / month vs ${fmtUsd(t.comparable_monthly_usd)} on ${esc(primaryName)} for the mirrored models`;
+  } else {
+    costKind = nr.target > 0 ? `cost not reported by ${esc(name)}` : nr.primary > 0 ? `cost not reported by ${esc(primaryName)}` : "no cost delta";
+    costLine = esc(h?.note ?? "no completed pairs");
+  }
   return `<div class="card">
   <div class="card-h"><span class="name">${esc(name)}</span><span class="via">${t.via === "relay" ? "via relay" : t.via === "direct" ? "direct" : ""}</span></div>
-  <div class="big ${deltaClass(h.delta_pct)}">${fmtPct(h.delta_pct)}</div>
-  <div class="muted small">${h.basis === "cache_neutral" ? "cache-neutral cost delta (one side ran from a warm cache; as-served shown below)" : "as-served cost delta"}</div>
-  <div class="sub">${subline}</div>
+  <div class="big ${deltaClass(h?.delta_pct)}">${fmtPct(h?.delta_pct)}</div>
+  <div class="muted small">${costKind}</div>
+  <div class="sub">${costLine}</div>
   <dl>
-    <dt>Δ as served</dt><dd>${delta(m?.delta_pct)} <span class="muted small">${fmtInt(m?.pairs)} priced pairs; ${fmtUsd(t.avg_cost_per_request_usd?.target, 5)} vs ${fmtUsd(t.avg_cost_per_request_usd?.primary, 5)} per request</span></dd>
-    <dt>Δ cache-neutral</dt><dd>${delta(t.delta_pct_cache_neutral)} <span class="muted small">cached tokens at full input price; cache share ${share(t.cache_share?.target)} vs ${share(t.cache_share?.primary)}</span></dd>
-    <dt>Δ price-only</dt><dd>${delta(t.delta_pct_price_only)} <span class="muted small">target prices on ${esc(primaryName)}'s token counts</span></dd>
-    <dt>Δ complete pairs</dt><dd>${delta(cp?.delta_pct)} <span class="muted small">${fmtInt(cp?.pairs)} of ${fmtInt(m?.pairs)} pairs finished normally on both sides</span></dd>
-    <dt>Truncated / no output</dt><dd>${fmtInt(tr.pairs)} truncated <span class="muted small">(${esc(primaryName)} only ${fmtInt(tr.primary_only)}, target only ${fmtInt(tr.target_only)}, both ${fmtInt(tr.both)})</span>; no output ${fmtInt(noOut.primary)} / ${fmtInt(noOut.target)} <span class="muted small">(${esc(primaryName)} / target)</span>${leak.pairs ? `; <span class="bad">reasoning leak ${fmtInt(leak.primary)} / ${fmtInt(leak.target)}</span>` : ""}${t.unpriced ? `; <span class="bad">${fmtInt(t.unpriced)} unpriced</span>` : ""}</dd>
-    <dt>Coverage</dt><dd>${fmtPct(t.coverage_pct, false)} of mirrored requests had a mapped model${(t.failing ?? []).length ? `; <span class="bad">${t.failing.length} model${t.failing.length === 1 ? "" : "s"} listed but failing</span>` : ""}</dd>
+    <dt>Δ ${billed ? "billed" : "reported"}</dt><dd>${delta(r?.delta_pct)} <span class="muted small">${fmtInt(r?.pairs)} pairs with a cost on both sides; ${fmtUsd(t.avg_cost_per_request_usd?.target, 5)} vs ${fmtUsd(t.avg_cost_per_request_usd?.primary, 5)} per request${nr.target || nr.primary ? `; no cost: ${esc(name)} ${fmtInt(nr.target)}, ${esc(primaryName)} ${fmtInt(nr.primary)}` : ""}</span></dd>
+    <dt>Δ complete pairs</dt><dd>${delta(cp?.delta_pct)} <span class="muted small">${fmtInt(cp?.pairs)} of ${fmtInt(r?.pairs)} pairs finished normally on both sides</span></dd>
+    <dt>Tokens</dt><dd>${tokensLine(t, primaryName)}</dd>
+    <dt>Truncated / no output</dt><dd>${fmtInt(tr.pairs)} truncated <span class="muted small">(${esc(primaryName)} only ${fmtInt(tr.primary_only)}, target only ${fmtInt(tr.target_only)}, both ${fmtInt(tr.both)})</span>; no output ${fmtInt(noOut.primary)} / ${fmtInt(noOut.target)} <span class="muted small">(${esc(primaryName)} / target)</span>${leak.pairs ? `; <span class="bad">reasoning leak ${fmtInt(leak.primary)} / ${fmtInt(leak.target)}</span>` : ""}</dd>
+    <dt>Accepted</dt><dd>${fmtPct(t.coverage_pct, false)} of mirrored requests${rejected.length ? `; <span class="bad">${rejected.length} model${rejected.length === 1 ? "" : "s"} rejected</span>` : ""}</dd>
     <dt>Latency p50 / p95</dt><dd>${q(t.latency)}</dd>
     <dt>TTFT p50</dt><dd>${ttftCell(t)}${ttftSides(t, primaryName)}</dd>
-    <dt>Error rate</dt><dd>${t.error_rate === null ? "–" : fmtPct(t.error_rate * 100, false)} (${fmtInt(t.errors)} of ${fmtInt(t.requests_mirrored - t.unmapped_requests)}) <span class="muted small">plus ${fmtInt(noOut.target)} ok-but-empty</span></dd>
+    <dt>Error rate</dt><dd>${t.error_rate === null ? "–" : fmtPct(t.error_rate * 100, false)} (${fmtInt(t.errors)} of ${fmtInt(t.requests_mirrored)}) <span class="muted small">plus ${fmtInt(noOut.target)} ok-but-empty</span></dd>
     <dt>Agreement</dt><dd>${t.agreement_rate === null ? "not judged" : `${fmtPct(t.agreement_rate * 100, false)} <span class="muted">(n=${t.agreement_judged}, ${jf >= 1 ? "every completed pair judged" : `${Math.round(jf * 100)}% sample`})</span>`}</dd>
   </dl>
-  ${reasons.length ? `<div class="muted small reasons"><strong>Why the judge called pairs different:</strong><ul>${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>` : ""}
+  ${reasons.length ? `<div class="muted small reasons"><strong>Why the judge called pairs different:</strong><ul>${reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
   ${t.cache_warning ? `<p class="warn">${esc(t.cache_warning)}</p>` : ""}
 </div>`;
 }
@@ -103,7 +124,8 @@ function detailRow(tm: TargetModelStats, a: ReportAggregates, primaryName: strin
   const noOut = tm.no_output ?? { primary: 0, target: 0 };
   const tr = tm.truncated ?? { pairs: 0, primary_only: 0, target_only: 0, both: 0 };
   const leak = tm.reasoning_leak ?? { pairs: 0, primary: 0, target: 0 };
-  const costPairs = tm.cost_pairs ?? tm.pairs;
+  const nr = tm.cost_not_reported ?? { primary: 0, target: 0 };
+  const costPairs = tm.cost_pairs ?? 0;
   const tok = tm.tokens;
   const tokNote = tok
     ? `<div class="muted small">out ${fmtInt(tok.primary.completion_tokens)} / ${fmtInt(tok.target.completion_tokens)}${tok.primary.reasoning_tokens || tok.target.reasoning_tokens ? ` (reasoning ${fmtInt(tok.primary.reasoning_tokens)} / ${fmtInt(tok.target.reasoning_tokens)})` : ""}; cached ${share(tm.cache_share?.primary)} / ${share(tm.cache_share?.target)}</div>`
@@ -111,12 +133,10 @@ function detailRow(tm: TargetModelStats, a: ReportAggregates, primaryName: strin
   return `<tr>
   <td>${esc(a.targets.find((t) => t.target === tm.target)?.name ?? tm.target)}</td>
   <td class="model">${esc(tm.model)}<div class="muted small">${esc(tm.target_model ?? "")}</div>${upstreamNote(tm, primaryName)}</td>
-  <td class="num">${fmtInt(tm.pairs)}${tm.unpriced ? `<div class="muted small">${fmtInt(tm.unpriced)} unpriced</div>` : ""}</td>
+  <td class="num">${fmtInt(tm.pairs)}${nr.target || nr.primary ? `<div class="muted small">not reported ${fmtInt(nr.primary)} / ${fmtInt(nr.target)}</div>` : ""}</td>
   <td class="num">${fmtUsd(costPairs ? tm.primary_cost_usd / costPairs : null, 5)}</td>
   <td class="num">${fmtUsd(costPairs ? tm.target_cost_usd / costPairs : null, 5)}</td>
-  <td class="num">${delta(tm.delta_pct, `as served over ${costPairs} priced pairs`)}${tokNote}</td>
-  <td class="num">${delta(tm.delta_pct_cache_neutral, "target cached tokens re-priced at full input rate")}</td>
-  <td class="num">${delta(tm.delta_pct_price_only, `target prices applied to ${primaryName} token counts`)}</td>
+  <td class="num">${costPairs ? delta(tm.delta_pct, `reported over ${costPairs} pairs (${originLabel(tm.target_cost_origin)})`) : `<span class="muted">not reported</span>`}${tokNote}</td>
   <td class="num">${delta(cp?.delta_pct)}<div class="muted small">n=${fmtInt(cp?.pairs)}</div></td>
   <td class="num">${q(tm.primary_latency)}</td>
   <td class="num">${q(tm.latency)}</td>
@@ -125,7 +145,7 @@ function detailRow(tm: TargetModelStats, a: ReportAggregates, primaryName: strin
   <td class="num">${fmtInt(noOut.primary)} / ${fmtInt(noOut.target)}${leak.pairs ? `<div class="bad small">leak ${fmtInt(leak.primary)} / ${fmtInt(leak.target)}</div>` : ""}</td>
   <td class="num">${tm.agreement ? `${fmtPct(tm.agreement.rate! * 100, false)} <span class="muted small">n=${tm.agreement.judged}</span>` : "–"}${(tm.disagreement_reasons ?? []).length ? `<div class="muted small reason" title="${esc(tm.disagreement_reasons.join(" | "))}">${esc(tm.disagreement_reasons[0].length > 70 ? tm.disagreement_reasons[0].slice(0, 70) + "…" : tm.disagreement_reasons[0])}</div>` : ""}</td>
   <td class="num">${tr.pairs ? `${tr.pairs}<div class="muted small">${esc(primaryName)} only ${tr.primary_only}, target only ${tr.target_only}${tr.both ? `, both ${tr.both}` : ""}</div>` : "0"}</td>
-  <td class="num">${tm.tool_calls ? `${tm.tool_calls.valid_json}/${tm.tool_calls.pairs} valid, ${tm.tool_calls.name_match}/${tm.tool_calls.pairs} same tool` : "–"}</td>
+  <td class="num">${tm.tool_call_stats ? `${tm.tool_call_stats.valid_json}/${tm.tool_call_stats.pairs} valid, ${tm.tool_call_stats.name_match}/${tm.tool_call_stats.pairs} same tool` : "–"}</td>
 </tr>`;
 }
 
@@ -134,7 +154,7 @@ export function renderReportHtml(a: ReportAggregates, opts: { published?: boolea
   const p = a.primary;
   const primaryName = p.provider === "openrouter" ? "OpenRouter" : p.provider === "openai" ? "OpenAI" : p.provider;
   const periodText = a.period ? `${a.period.from} to ${a.period.to} (${a.period.days} day${a.period.days === 1 ? "" : "s"}${a.period.span_hours !== undefined && a.period.span_hours < 24 ? `, ${a.period.span_hours < 1 ? "under an hour" : `${a.period.span_hours.toFixed(1)} h`} of traffic` : ""})` : "no date range";
-  const costLabel = p.cost_source === "measured" ? "measured" : p.cost_source === "computed" ? "computed" : p.cost_source;
+  const costLabel = p.cost_source === "reported" ? "as reported" : p.cost_source === "mixed" ? `reported on ${fmtInt(p.requests_ok - (p.cost_not_reported ?? 0))} of ${fmtInt(p.requests_ok)} requests` : "not reported";
   const lowConfidence = (a.projection?.confidence ?? "ok") === "low";
   const scaledFrom = a.projection?.basis === "elapsed_time" ? "scaled from elapsed time" : `scaled from ${a.period?.days ?? 0} day${a.period?.days === 1 ? "" : "s"}`;
 
@@ -145,39 +165,31 @@ export function renderReportHtml(a: ReportAggregates, opts: { published?: boolea
       const cells = a.targets
         .map((t) => {
           const tm = a.target_models.find((x) => x.target === t.target && x.model === m.model);
-          if (!tm) return `<td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td>`;
-          if (tm.pairs === 0) return `<td class="num muted">${tm.unmapped > 0 ? "unmapped" : "no pairs"}</td><td class="num muted">–</td><td class="num muted">–</td><td class="num muted">–</td>`;
-          const costPairs = tm.cost_pairs ?? tm.pairs;
-          if (costPairs === 0) return `<td class="num muted">unpriced</td><td class="num muted">–</td><td class="num muted">–</td><td class="num">${q(tm.latency)}</td>`;
+          if (!tm) return `<td class="num muted">–</td><td class="num muted">–</td>`;
+          if (tm.pairs === 0) return `<td class="num muted">${tm.errors > 0 && tm.errors === tm.requests_mirrored ? "rejected" : "no pairs"}</td><td class="num muted">–</td>`;
+          const costPairs = tm.cost_pairs ?? 0;
+          if (costPairs === 0) return `<td class="num muted">not reported</td><td class="num">${q(tm.latency)}</td>`;
           const perPair = tm.target_cost_usd / costPairs;
-          return `<td class="num ${deltaClass(tm.delta_pct)}" title="as served: ${fmtUsd(perPair, 5)} per request (computed) over ${costPairs} priced pairs">${fmtPct(tm.delta_pct)}</td><td class="num ${deltaClass(tm.delta_pct_cache_neutral)}" title="target cached tokens re-priced at full input rate">${fmtPct(tm.delta_pct_cache_neutral)}</td><td class="num ${deltaClass(tm.delta_pct_price_only)}" title="target prices on the primary's own token counts">${fmtPct(tm.delta_pct_price_only)}</td><td class="num">${q(tm.latency)}</td>`;
+          return `<td class="num ${deltaClass(tm.delta_pct)}" title="reported: ${fmtUsd(perPair, 5)} per request over ${costPairs} pairs">${fmtPct(tm.delta_pct)}</td><td class="num">${q(tm.latency)}</td>`;
         })
         .join("");
       return `<tr><td class="model">${esc(m.model)}</td><td class="num">${fmtInt(m.requests)}${m.no_output ? `<div class="muted small">${fmtInt(m.no_output)} no output</div>` : ""}</td><td class="num">${fmtInt(m.prompt_tokens + m.completion_tokens)}</td><td class="num">${fmtUsd(m.cost_usd)}</td><td class="num">${q(m.latency)}</td>${cells}</tr>`;
     })
     .join("\n");
 
-  const targetHeaders = a.targets.map((t) => `<th colspan="4">${esc(t.name ?? t.target)}</th>`).join("");
-  const targetSubHeaders = a.targets.map(() => `<th class="num">Δ as served</th><th class="num">Δ cache-neutral</th><th class="num">Δ price-only</th><th class="num">lat p50/p95</th>`).join("");
+  const targetHeaders = a.targets.map((t) => `<th colspan="2">${esc(t.name ?? t.target)}</th>`).join("");
+  const targetSubHeaders = a.targets.map(() => `<th class="num">Δ reported</th><th class="num">lat p50/p95</th>`).join("");
 
   const detailRows = a.target_models
     .filter((tm) => tm.pairs > 0 || tm.errors > 0)
     .map((tm) => detailRow(tm, a, primaryName))
     .join("\n");
 
-  const failing = a.targets
-    .filter((t) => (t.failing ?? []).length)
+  const rejected = a.targets
+    .filter((t) => (t.rejected ?? []).length)
     .map(
-      (t) => `<div class="gap"><h4>${esc(t.name ?? t.target)}: listed but failing</h4><ul>${t.failing
-        .map((f) => `<li><span class="model">${esc(f.model)}</span> → <span class="model">${esc(f.target_model ?? "")}</span> <span class="muted">${fmtInt(f.attempts)} of ${fmtInt(f.attempts)} attempts failed (${esc(f.error_type.replace(/_/g, " "))})</span></li>`)
-        .join("")}</ul></div>`,
-    )
-    .join("\n");
-  const gaps = a.targets
-    .filter((t) => t.gaps.length)
-    .map(
-      (t) => `<div class="gap"><h4>${esc(t.name ?? t.target)}</h4><ul>${t.gaps
-        .map((g) => `<li><span class="model">${esc(g.model)}</span> <span class="muted">${fmtInt(g.requests)} request${g.requests === 1 ? "" : "s"}</span>${g.suggestion ? `<span class="muted"> · possible match: <span class="model">${esc(g.suggestion)}</span> (not used)</span>` : ""}</li>`)
+      (t) => `<div class="gap"><h4>${esc(t.name ?? t.target)}</h4><ul>${t.rejected
+        .map((f) => `<li><span class="model">${esc(f.model)}</span>${f.target_model && f.target_model !== f.model ? ` → <span class="model">${esc(f.target_model)}</span>` : ""} <span class="muted">${fmtInt(f.attempts)} request${f.attempts === 1 ? "" : "s"} rejected (${esc(f.error_type.replace(/_/g, " "))})</span></li>`)
         .join("")}</ul></div>`,
     )
     .join("\n");
@@ -187,14 +199,9 @@ export function renderReportHtml(a: ReportAggregates, opts: { published?: boolea
     .map(([k, v]) => `${esc(k.replace(/_/g, " "))}: ${fmtInt(v)}`)
     .join(", ");
 
-  const prices = a.method.prices
-    .filter((x) => x.captured || x.source)
-    .map((x) => `<li>${esc(x.target)}: price table captured ${esc(x.captured ?? "n/a")}${x.source ? ` from <a href="${esc(x.source)}">${esc(new URL(x.source).hostname)}</a>` : ""}</li>`)
-    .join("");
-
   const spendStat = lowConfidence
-    ? `<div class="stat"><div class="k">Measured spend${costLabel === "measured" ? "" : ` (${esc(costLabel)})`}</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${fmtUsd(p.avg_cost_per_request_usd, 5)} per request over ${fmtInt(p.requests_ok - (p.unpriced ?? 0))} priced · rough extrapolation ${fmtUsd(p.monthly_usd)} / month (${esc(scaledFrom)})</div></div>`
-    : `<div class="stat"><div class="k">Current spend (${esc(costLabel)})</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${a.period && a.period.days !== 30 ? `${fmtUsd(p.monthly_usd)} / month ${esc(scaledFrom)}` : "over the period"} · ${fmtUsd(p.avg_cost_per_request_usd, 5)} per request</div></div>`;
+    ? `<div class="stat"><div class="k">Reported spend</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${esc(costLabel)} · ${fmtUsd(p.avg_cost_per_request_usd, 5)} per request over ${fmtInt(p.requests_ok - (p.cost_not_reported ?? 0))} reported · rough extrapolation ${fmtUsd(p.monthly_usd)} / month (${esc(scaledFrom)})</div></div>`
+    : `<div class="stat"><div class="k">Reported spend</div><div class="v">${fmtUsd(p.cost_usd)}</div><div class="s">${esc(costLabel)} · ${a.period && a.period.days !== 30 ? `${fmtUsd(p.monthly_usd)} / month ${esc(scaledFrom)}` : "over the period"} · ${fmtUsd(p.avg_cost_per_request_usd, 5)} per request</div></div>`;
 
   return `<!doctype html>
 <html lang="en">
@@ -236,11 +243,10 @@ th{color:var(--muted);font-weight:500;white-space:nowrap;background:var(--card);
 tr:last-child td{border-bottom:0}
 td.num,th.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 .model{font-family:var(--mono);font-size:12.5px;overflow-wrap:anywhere;min-width:150px}
-.lede,.sub,.method,.fee,.note,.warn{overflow-wrap:anywhere}
+.lede,.sub,.method,.note,.warn{overflow-wrap:anywhere}
 .gap{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--card);margin-bottom:10px}
 .gap ul{margin:4px 0 0;padding-left:18px}
 .method{color:var(--muted);font-size:13px}.method li{margin-bottom:4px}
-.fee{color:var(--muted);font-size:13px;margin-top:6px}
 footer{margin-top:40px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding-top:12px}
 a{color:var(--accent)}
 @media (max-width:600px){.card .big{font-size:26px}.stat .v{font-size:19px}}
@@ -253,15 +259,14 @@ a{color:var(--accent)}
 
 <div class="topline">
   ${spendStat}
-  <div class="stat"><div class="k">Requests</div><div class="v">${fmtInt(p.requests_ok)}</div><div class="s">${fmtInt(p.errors)} failed on ${esc(primaryName)}${p.no_output ? `, ${fmtInt(p.no_output)} returned no output` : ""}</div></div>
+  <div class="stat"><div class="k">Requests</div><div class="v">${fmtInt(p.requests_ok)}</div><div class="s">${fmtInt(p.errors)} failed on ${esc(primaryName)}${p.no_output ? `, ${fmtInt(p.no_output)} returned no output` : ""}${p.cost_not_reported ? `, ${fmtInt(p.cost_not_reported)} without a reported cost` : ""}</div></div>
   <div class="stat"><div class="k">${esc(primaryName)} latency p50 / p95</div><div class="v">${q(p.latency)}</div><div class="s">TTFT p50 ${fmtMs(p.ttft.p50)} (${esc(p.ttft_method ? methodLabel(p.ttft_method) : "no streamed requests")}, streamed only)</div></div>
   <div class="stat"><div class="k">Tokens in / out</div><div class="v">${fmtInt(p.prompt_tokens)} / ${fmtInt(p.completion_tokens)}</div><div class="s">as reported by ${esc(primaryName)}${p.cached_tokens ? `; ${fmtInt(p.cached_tokens)} cached` : ""}${p.reasoning_tokens ? `; ${fmtInt(p.reasoning_tokens)} reasoning` : ""}</div></div>
 </div>
-${lowConfidence ? `<p class="note"><strong>Projection confidence: low.</strong> ${esc(a.projection?.reason ?? "")}. Monthly figures on this page are rough extrapolations; read the measured totals and per-request averages first.</p>` : ""}
-${p.topup_fee_usd !== null ? `<p class="fee">OpenRouter credit top-up fee at 5.5%: about ${fmtUsd(p.topup_fee_usd)} / month on top of the spend above. Not applied to targets. Hidden with --byok.</p>` : ""}
+${lowConfidence ? `<p class="note"><strong>Projection confidence: low.</strong> ${esc(a.projection?.reason ?? "")}. Monthly figures on this page are rough extrapolations; read the reported totals and per-request averages first.</p>` : ""}
 
 <h2>Cost on each target</h2>
-<p class="muted small">The big number is the cost delta for the mirrored, mapped models over pairs priced on both sides. It is the as-served delta (what each side actually charged) unless one side was served from a much warmer prompt cache, in which case the cache-neutral delta leads and a note says so. Under it, all four views: as served, cache-neutral (the target's cached tokens at its full input price), price-only (the target's price list on ${esc(primaryName)}'s own token counts, which isolates price from how much each model chose to write), and complete pairs (as served, only where both sides finished normally). Target costs are computed from public price tables; ${esc(primaryName)} costs are ${esc(costLabel)}.</p>
+<p class="muted small">The big number is the cost delta between what each provider reported or billed for the same requests, over pairs where both sides have a cost. ${esc(primaryName)} reports usage.cost on each response. TokenRouter does not report cost per response: with free credits the relay fills in TokenRouter's own billed amounts per request; with your own TokenRouter key the card shows token counts and leaves dollars to you. Complete pairs repeats the delta over pairs where both sides finished normally. Tokens are what each side reported. No figure on this page comes from a price list: RouteArena computes no prices and ships none.</p>
 <div class="cards">
 ${targetCards || '<p class="muted">No targets received mirrored traffic. Add a target key or claim free credits, then run again.</p>'}
 </div>
@@ -278,30 +283,27 @@ ${targetCards || '<p class="muted">No targets received mirrored traffic. Add a t
 ${
   detailRows
     ? `<h2>Paired comparison detail</h2>
-<p class="muted small">Only requests that returned on both sides. Per-request costs are averages over priced pairs. Δ as served: each side's own bill. Δ cache-neutral: target cached tokens at the full input rate. Δ price-only: target prices on ${esc(primaryName)}'s token counts. Δ complete: as served, over pairs where both sides finished with stop or tool_calls and neither was empty. TTFT shows ${esc(primaryName)} / target on one measurement, or "not comparable". No output counts ${esc(primaryName)} / target responses with status ok and nothing in them; a "leak" line under it counts responses whose content was the model's reasoning channel instead of an answer.</p>
+<p class="muted small">Only requests that returned on both sides. Per-request costs are averages over pairs with a cost on both sides. Δ reported: each provider's own figure for its response (reported on it, or billed for it). Δ complete: the same, over pairs where both sides finished with stop or tool_calls and neither was empty. TTFT shows ${esc(primaryName)} / target on one measurement, or "not comparable". No output counts ${esc(primaryName)} / target responses with status ok and nothing in them; a "leak" line under it counts responses whose content was the model's reasoning channel instead of an answer.</p>
 <div class="tablewrap"><table>
-<thead><tr><th>Target</th><th>Model</th><th class="num">Pairs</th><th class="num">${esc(primaryName)} $/req</th><th class="num">Target $/req</th><th class="num">Δ as served</th><th class="num">Δ cache-neutral</th><th class="num">Δ price-only</th><th class="num">Δ complete</th><th class="num">${esc(primaryName)} lat</th><th class="num">Target lat</th><th class="num">TTFT p50</th><th class="num">Errors</th><th class="num">No output</th><th class="num">Agreement</th><th class="num">Truncated</th><th class="num">Tool calls</th></tr></thead>
+<thead><tr><th>Target</th><th>Model</th><th class="num">Pairs</th><th class="num">${esc(primaryName)} $/req</th><th class="num">Target $/req</th><th class="num">Δ reported</th><th class="num">Δ complete</th><th class="num">${esc(primaryName)} lat</th><th class="num">Target lat</th><th class="num">TTFT p50</th><th class="num">Errors</th><th class="num">No output</th><th class="num">Agreement</th><th class="num">Truncated</th><th class="num">Tool calls</th></tr></thead>
 <tbody>${detailRows}</tbody>
 </table></div>`
     : ""
 }
 
-<h2>Coverage gaps</h2>
-<p class="muted small">Models in this traffic with no explicit mapping on a target, and mapped models the target rejected every time. Nothing was projected for these; a possible match is shown only as a hint.</p>
-${failing}
-${gaps || (failing ? "" : '<p class="muted">None. Every model seen had a mapping on every target.</p>')}
+<h2>Rejected by a target</h2>
+<p class="muted small">Models a target refused as sent (model not found, bad request, unsupported parameter, or an auth failure). The model id sent to the target was chosen by you or your agent; pass a different one with <span class="model">routearena init --map &lt;target&gt;:&lt;model&gt;=&lt;targetModel&gt;</span>. Nothing was projected for these.</p>
+${rejected || '<p class="muted">None. Every mirrored request was accepted by every target.</p>'}
 
 <h2>Method</h2>
 <ul class="method">
   <li>${esc(a.method.costs)}</li>
-  ${a.method.cost_deltas ? `<li>${esc(a.method.cost_deltas)}</li>` : ""}
   ${a.method.complete_pairs ? `<li>${esc(a.method.complete_pairs)}</li>` : ""}
   ${a.method.empty_outputs ? `<li>${esc(a.method.empty_outputs)}</li>` : ""}
   <li>${esc(a.method.sampling)}${skipped ? ` Not mirrored: ${skipped}.` : ""}</li>
   <li>${esc(a.method.ttft)}</li>
   <li>${esc(a.method.agreement)}${a.method.judge_model ? ` Judge model: <span class="model">${esc(a.method.judge_model)}</span>.` : " No judge model was available, so only exact matches were scored."}</li>
-  ${prices}
-  <li>${esc(a.method.projection ?? "Monthly figures scale the observed period to 30 days.")} Nothing here is a quote; prices change.</li>
+  <li>${esc(a.method.projection ?? "Monthly figures scale the observed period to 30 days.")} Nothing here is a quote.</li>
   ${a.method.sample_size_note ? `<li><strong>${esc(a.method.sample_size_note)}</strong></li>` : ""}
 </ul>
 

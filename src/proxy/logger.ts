@@ -3,14 +3,19 @@ import readline from "node:readline";
 import { ensureConfigDir, logPath, redact } from "../config.js";
 import type { Usage } from "../targets/mapping.js";
 
-export type CostSource = "measured" | "computed" | "unknown";
+/**
+ * Where a side's cost_usd came from. "reported": the provider's own response carried a per-request cost
+ * (OpenRouter-style `usage.cost`). "not_reported": it did not, so cost_usd is null and the request is unpriced.
+ * RouteArena never computes a cost from a price table; it ships none.
+ */
+export type CostSource = "reported" | "not_reported";
 
 export interface SideResult {
   /** "openrouter" | "openai" for the primary; target id for mirrors. */
   provider: string;
   /** Model string as sent to this provider. */
   model: string;
-  status: "ok" | "error" | "unmapped" | "skipped";
+  status: "ok" | "error" | "skipped";
   http_status?: number;
   /** Wall time from just before fetch() to the end of the response (or to the failure, including timeouts). */
   latency_ms?: number;
@@ -40,11 +45,11 @@ export interface SideResult {
   response_id?: string;
   stream?: boolean;
   usage?: Usage | null;
-  /** Null when the provider returned no usage (cost_source "unknown"), so the report can treat the request as unpriced. */
+  /** The provider-reported cost in USD, or null when the provider reported none (cost_source "not_reported"). */
   cost_usd?: number | null;
   cost_source?: CostSource;
-  /** A `usage.cost` the provider itself returned, if any. Informational; target cost is always computed. */
-  reported_cost_usd?: number;
+  /** The provider's own request id from its response header (Target.requestIdHeader), when it sends one. */
+  target_request_id?: string;
   error_type?: string;
   error?: string;
   /** Upstream host the router reported serving this request (OpenRouter's "provider" field). Most routers report none. */
@@ -60,7 +65,7 @@ export interface LogRecord {
   v: 1;
   id: string;
   ts: string;
-  /** Canonical (OpenRouter-style) model id used for mapping and grouping. */
+  /** Canonical (OpenRouter-style) model id used to group requests in the report. */
   canonical_model: string;
   request: {
     stream: boolean;

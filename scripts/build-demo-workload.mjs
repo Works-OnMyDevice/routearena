@@ -17,14 +17,8 @@ const MAX_PAGE_CHARS = 9000; // keeps each prompt roughly 2.5K tokens so 100 req
 const templates = JSON.parse(fs.readFileSync(path.join(root, "demo", "templates", "templates.json"), "utf8"));
 const sources = JSON.parse(fs.readFileSync(path.join(root, "demo", "templates", "sources.json"), "utf8"));
 
-// Models rotate through a spread of what people actually route (OpenRouter rankings, 2026-11-05) that also exist on
-// several targets. Each item names its OpenRouter id; the demo strips the vendor prefix for an OpenAI primary.
-const MODELS = ["openai/gpt-4o-mini", "deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash", "openai/gpt-oss-120b", "qwen/qwen3.8-flash", "minimax/minimax-m3.1-flash", "xiaomi/mimo-v2.6-flash", "mistralai/mistral-small-2603"];
-// Reasoning models think for thousands of tokens on this task (measured 2026-11-06: GLM-5.3 Flash 4.7K, MiniMax M3.1 3.7K,
-// DeepSeek V4.1 Flash 1.3K before any JSON). They get a larger output budget and reasoning_effort: "low", which an
-// extraction app would set too. Providers that ignore the hint still fit in 8000 tokens.
-// Every model in MODELS was verified on 2026-11-06 to complete a minimal JSON request on both OpenRouter and TokenRouter.
-const REASONING = new Set(["deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3-flash", "minimax/minimax-m3.1-flash", "qwen/qwen3.8-flash"]);
+// Items carry no model: the agent running the demo supplies model ids (demo --models), and every item gets the same
+// output budget (8000 tokens) so a reasoning model assigned to any item has room to think before it answers.
 
 function htmlToText(html) {
   let s = html;
@@ -75,22 +69,19 @@ for (const src of sources) {
     continue;
   }
   const page = text.length > MAX_PAGE_CHARS ? text.slice(0, MAX_PAGE_CHARS) + "\n[truncated]" : text;
-  const model = MODELS[n % MODELS.length];
   n++;
   items.push({
     id: `demo-${String(n).padStart(3, "0")}`,
     template: src.template,
     source_url: src.url,
     fetched_at: new Date().toISOString().slice(0, 10),
-    model,
     messages: [
       { role: "system", content: tpl.system },
       { role: "user", content: tpl.user.replace("{{url}}", src.url).replace("{{fields}}", tpl.fields.join(", ")).replace("{{page}}", page) },
     ],
     response_format: { type: "json_object" },
     temperature: 0,
-    max_tokens: REASONING.has(model) ? 8000 : 2000,
-    ...(REASONING.has(model) ? { reasoning_effort: "low" } : {}),
+    max_tokens: 8000,
   });
   console.error(`ok   ${src.template.padEnd(22)} ${src.url}`);
 }

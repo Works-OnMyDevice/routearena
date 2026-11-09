@@ -1,5 +1,5 @@
-import type { Usage } from "../targets/mapping.js";
-import type { SideResult } from "./logger.js";
+import { reportedCost, type Usage } from "../targets/mapping.js";
+import type { CostSource, SideResult } from "./logger.js";
 
 export interface ToolCallOut {
   name: string;
@@ -21,7 +21,12 @@ export interface CallResult {
   empty_output?: boolean;
   /** Provider's chat completion id (first chunk's id for streams). */
   response_id?: string;
+  /** Response headers, lowercased, so callers can pick out a provider request id (Target.requestIdHeader). */
+  response_headers?: Record<string, string>;
   usage: Usage | null;
+  /** The provider-reported cost (`usage.cost`), or null when the response carries none. Never computed. */
+  cost_usd: number | null;
+  cost_source: CostSource;
   finish_reason: string | null;
   completion_text: string | null;
   tool_calls: ToolCallOut[] | null;
@@ -228,7 +233,10 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
         http_status: res.status,
         latency_ms: performance.now() - t0,
         ttft_method: "n/a",
+        response_headers: headersOf(res),
         usage: null,
+        cost_usd: null,
+        cost_source: "not_reported",
         finish_reason: null,
         completion_text: null,
         tool_calls: null,
@@ -265,7 +273,9 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
         ttft_first_byte_ms: firstByte,
         ttft_first_content_ms: firstContent,
         response_id: acc.id ?? undefined,
+        response_headers: headersOf(res),
         usage: acc.usage,
+        ...costOf(acc.usage),
         finish_reason: acc.finish_reason,
         completion_text: text,
         tool_calls: toolCalls,
@@ -286,7 +296,9 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
         http_status: res.status,
         latency_ms: performance.now() - t0,
         ttft_method: "n/a",
+        response_headers: headersOf(res),
         ...ex,
+        ...costOf(ex.usage),
         error_type: classifyInBodyError(json.error),
         error: inBodyErrorMessage(json.error),
         json,
@@ -297,7 +309,9 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
       http_status: res.status,
       latency_ms: performance.now() - t0,
       ttft_method: "n/a",
+      response_headers: headersOf(res),
       ...ex,
+      ...costOf(ex.usage),
       empty_output: empty || undefined,
       json,
     };
@@ -307,6 +321,8 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
       latency_ms: performance.now() - t0,
       ttft_method: "n/a",
       usage: null,
+      cost_usd: null,
+      cost_source: "not_reported",
       finish_reason: null,
       completion_text: null,
       tool_calls: null,
@@ -316,6 +332,20 @@ export async function chatCompletion(opts: CallOptions): Promise<CallResult> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function headersOf(res: Response): Record<string, string> {
+  const out: Record<string, string> = {};
+  res.headers.forEach((v, k) => {
+    out[k.toLowerCase()] = v;
+  });
+  return out;
+}
+
+/** cost_usd / cost_source for a usage record: the provider's own `usage.cost` or nothing. */
+export function costOf(usage: Usage | null | undefined): { cost_usd: number | null; cost_source: CostSource } {
+  const c = reportedCost(usage);
+  return c === null ? { cost_usd: null, cost_source: "not_reported" } : { cost_usd: c, cost_source: "reported" };
 }
 
 function safeErrorMessage(txt: string): string {
@@ -343,6 +373,8 @@ export function toSideResult(provider: string, model: string, r: CallResult, ext
     empty_output: r.empty_output,
     response_id: r.response_id,
     usage: r.usage,
+    cost_usd: r.cost_usd,
+    cost_source: r.cost_source,
     finish_reason: r.finish_reason,
     completion_text: r.completion_text,
     tool_calls: r.tool_calls,

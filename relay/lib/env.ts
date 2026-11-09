@@ -1,6 +1,9 @@
 /**
  * Configuration. On Cloudflare the worker calls setEnv(env) per request so vars and secrets are read from the
  * binding object; under Node (tests, scripts) process.env is used.
+ *
+ * The relay never ships or computes prices. The only money-shaped value here is PER_CLAIM_USD, which is passed
+ * verbatim to TokenRouter's Management API as the quota on each handed-out key; TokenRouter enforces it.
  */
 let vars: Record<string, string | undefined> = {};
 export function setEnv(e: Record<string, unknown>): void {
@@ -20,9 +23,6 @@ export const env = {
   get trBase() {
     return (get("TOKENROUTER_BASE_URL") || "https://api.tokenrouter.com").replace(/\/$/, "");
   },
-  get masterKey() {
-    return get("TOKENROUTER_MASTER_KEY") || "";
-  },
   get managementKey() {
     return get("TOKENROUTER_MANAGEMENT_KEY") || "";
   },
@@ -37,37 +37,19 @@ export const env = {
   get publicBase() {
     return (get("PUBLIC_BASE_URL") || "http://localhost:8787").replace(/\/$/, "");
   },
-  /** Hard per-person cap. Defaults to $1 and is clamped so a bad value cannot raise it above $5. */
+  /** Quota requested from TokenRouter for each handed-out key. Defaults to $1 and is clamped so a bad value cannot raise it above $5. */
   get perClaimUsd() {
     return Math.min(num("PER_CLAIM_USD", 1), 5);
   },
-  /** Relay mode: max completion tokens forced onto every forwarded request. */
-  get relayMaxTokens() {
-    return Math.min(num("RELAY_MAX_TOKENS", 2048), 8192);
-  },
-  /** Relay mode: requests per minute per claim. */
-  get relayRpm() {
-    return num("RELAY_RPM", 60);
-  },
-  /** Relay mode: a request whose usage never arrives is charged its full estimate after this long. */
-  get settleTimeoutMs() {
-    return num("RELAY_SETTLE_TIMEOUT_MS", 125_000);
-  },
-  /** Reservations older than this are charged in full by the Durable Object regardless of the isolate. */
-  get reservationMaxAgeSec() {
-    return num("RESERVATION_MAX_AGE_SEC", 600);
-  },
-  get globalCapUsd() {
-    return num("GLOBAL_CAP_USD", 300);
+  /** Ceiling on the total number of pool keys ever issued. A count, not a price. */
+  get maxIssuedKeys() {
+    return Math.floor(num("MAX_ISSUED_KEYS", 300));
   },
   get claimDays() {
     return num("CLAIM_DAYS", 7);
   },
   get claimsEnabled() {
     return (get("CLAIMS_ENABLED") ?? "true") !== "false";
-  },
-  get relayEnabled() {
-    return (get("RELAY_ENABLED") ?? "true") !== "false";
   },
   get resendKey() {
     return get("RESEND_API_KEY") || "";
@@ -111,7 +93,7 @@ export function bearer(req: Request): string | null {
   return m ? m[1].trim() : null;
 }
 
-/** Structured metadata log line. Never include bodies. */
+/** Structured metadata log line. Never include bodies or keys. */
 export function logEvent(event: string, fields: Record<string, unknown>): void {
   console.log(JSON.stringify({ t: new Date().toISOString(), event, ...fields }));
 }

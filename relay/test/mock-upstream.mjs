@@ -1,15 +1,16 @@
-// Mock TokenRouter for local integration tests: chat completions (stream/non-stream), models, Management API.
-// Behaviors are selected per request through the user message text:
-//   "nousage"  -> response without a usage object
-//   "slow"     -> 300ms per chunk so the client can cancel mid-stream
-//   "fail"     -> HTTP 500
+// Mock TokenRouter Management API for local integration tests. The relay never forwards chat traffic, so there is
+// no /v1 surface here at all: any request to it is a bug and gets a 404.
 // Prints its port on stdout as JSON {"port":N}. Management calls are recorded and exposed at GET /_mgmt_log.
+// Test hooks:
+//   POST /_seed_key   { key, name, fail_quota? }      create a key; fail_quota makes PUT quota return 500
+//   POST /_seed_usage { rows: [{ request_id, key_name, model_name, prompt_tokens, completion_tokens, cost, created_at? }] }
+//   POST /_usage_429  { on: boolean }                 make GET hour/usages answer 429 while on
 import http from "node:http";
 
 const mgmtLog = [];
-const keys = new Map(); // key -> { name, unlimited_quota, remain_quota, used_quota, status }
-const PRICE_TOKENS = { prompt_tokens: 1000, completion_tokens: 2000 }; // 1000 in + 2000 out
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const keys = new Map(); // key -> { name, unlimited_quota, remain_quota, used_quota, status, fail_quota }
+const usages = [];
+let usage429 = false;
 
 const server = http.createServer(async (req, res) => {
   const chunks = [];
@@ -27,18 +28,29 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(obj));
   };
 
+  // ---- test hooks ----
   if (url.pathname === "/_mgmt_log") return json(200, { calls: mgmtLog, keys: [...keys.entries()].map(([k, v]) => ({ key_tail: k.slice(-4), ...v })) });
   if (url.pathname === "/_seed_key") {
-    keys.set(body.key, { name: body.name, unlimited_quota: true, remain_quota: 0, used_quota: 0, status: 1 });
+    keys.set(body.key, { name: body.name, unlimited_quota: true, remain_quota: 0, used_quota: 0, status: 1, fail_quota: body.fail_quota === true });
     return json(200, { ok: true });
   }
-  if (url.pathname === "/v1/models") return json(200, { object: "list", data: [{ id: "openai/gpt-4o-mini" }, { id: "z-ai/glm-5.3-flash" }] });
+  if (url.pathname === "/_seed_usage") {
+    const now = Math.floor(Date.now() / 1000);
+    for (const r of body.rows ?? []) usages.push({ created_at: now, ...r });
+    return json(200, { ok: true, total: usages.length });
+  }
+  if (url.pathname === "/_usage_429") {
+    usage429 = body.on === true;
+    return json(200, { ok: true, usage429 });
+  }
 
-  // Management API
+  // ---- Management API ----
+  if (req.headers.authorization !== "Bearer mock-mgmt" && url.pathname.startsWith("/api/management")) return json(401, { success: false, message: "management key is invalid" });
   if (url.pathname === "/api/management/api-keys/quota" && req.method === "PUT") {
     mgmtLog.push({ path: "quota", key_tail: String(body.key).slice(-4), unlimited: body.unlimited_quota, remain: body.remain_quota });
     const k = keys.get(body.key);
     if (!k) return json(400, { success: false, message: "api key not found" });
+    if (k.fail_quota) return json(500, { success: false, message: "mock: quota service unavailable" });
     k.unlimited_quota = !!body.unlimited_quota;
     k.remain_quota = Number(body.remain_quota ?? 0);
     return json(200, { success: true, data: { name: k.name, key: "sk-****", status: 1, unlimited_quota: k.unlimited_quota, remain_quota: k.remain_quota, used_quota: k.used_quota, expired_time: -1 } });
@@ -53,27 +65,18 @@ const server = http.createServer(async (req, res) => {
     mgmtLog.push({ path: "list" });
     return json(200, { success: true, data: { page: 1, page_size: 100, total: keys.size, items: [...keys.values()].map((k) => ({ name: k.name, key: "sk-****", status: k.status, unlimited_quota: k.unlimited_quota, remain_quota: k.remain_quota, used_quota: k.used_quota, expired_time: -1, created_time: 0 })) } });
   }
-
-  if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
-    if (req.headers.authorization !== "Bearer mock-master") return json(401, { error: { message: "Invalid token" } });
-    const text = String(body.messages?.[body.messages.length - 1]?.content ?? "");
-    if (text.includes("fail")) return json(500, { error: { message: "mock upstream failure" } });
-    const usage = text.includes("nousage") ? undefined : PRICE_TOKENS;
-    if (body.stream) {
-      res.writeHead(200, { "content-type": "text/event-stream" });
-      const send = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
-      const slow = text.includes("slow");
-      for (let i = 0; i < 20; i++) {
-        send({ id: "x", choices: [{ index: 0, delta: { content: `tok${i} ` }, finish_reason: null }] });
-        if (slow) await sleep(300);
-      }
-      send({ id: "x", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage });
-      res.write("data: [DONE]\n\n");
-      res.end();
-      return;
-    }
-    return json(200, { id: "x", object: "chat.completion", model: body.model, choices: [{ index: 0, message: { role: "assistant", content: "mock answer" }, finish_reason: "stop" }], ...(usage ? { usage } : {}) });
+  if (url.pathname === "/api/management/hour/usages" && req.method === "GET") {
+    const start = Number(url.searchParams.get("start_timestamp"));
+    const end = Number(url.searchParams.get("end_timestamp"));
+    const page = Number(url.searchParams.get("page") ?? 1);
+    const size = Number(url.searchParams.get("page_size") ?? 100);
+    mgmtLog.push({ path: "usages", start, end, page });
+    if (usage429) return json(429, { success: false, message: "too many requests, please try again later" });
+    if (end - start > 3600) return json(400, { success: false, message: "time range must not exceed 1 hour" });
+    const inRange = usages.filter((r) => r.created_at >= start && r.created_at <= end);
+    return json(200, { success: true, data: { page, page_size: size, total: inRange.length, total_cost: inRange.reduce((s, r) => s + Number(r.cost ?? 0), 0), items: inRange.slice((page - 1) * size, page * size) } });
   }
+
   json(404, { error: "mock: not found" });
 });
 server.listen(0, "127.0.0.1", () => {

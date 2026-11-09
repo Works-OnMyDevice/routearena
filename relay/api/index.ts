@@ -7,10 +7,10 @@ export async function GET(): Promise<Response> {
 <h1>RouteArena relay</h1>
 <p>This is the hosted half of <a href="https://github.com/Works-OnMyDevice/routearena">RouteArena</a>, a CLI that shows what your LLM traffic would cost on other providers. The CLI runs on your machine; this service does two small things:</p>
 <ul>
-<li><strong>Free TokenRouter mirror credits.</strong> <code>POST /api/claim</code> emails a magic link; <code>GET /api/verify</code> activates $${env.perClaimUsd.toFixed(2)} for ${env.claimDays} days. Preferred mode hands you a dedicated TokenRouter key capped at that amount, so your mirrored requests go straight to TokenRouter and never pass through here. Fallback mode forwards <code>POST /v1/chat/completions</code> with a metered token.</li>
+<li><strong>Free TokenRouter mirror credits.</strong> <code>POST /api/claim</code> emails a magic link; <code>GET /api/verify</code> activates $${env.perClaimUsd.toFixed(2)} for ${env.claimDays} days by handing you a dedicated TokenRouter key that TokenRouter itself caps at that amount. Your mirrored requests go straight to TokenRouter and never pass through here; this relay forwards nothing and keeps no price table.</li>
 <li><strong>Published reports.</strong> <code>POST /api/publish</code> stores report aggregates (numbers only; anything that looks like a prompt or completion is rejected) and <code>GET /r/:id</code> renders them.</li>
 </ul>
-<p><strong>What is logged:</strong> claim id, model, token counts, cost, status, latency. <strong>Never:</strong> prompts, completions, or your other providers' keys. Source for every endpoint is in the <a href="https://github.com/Works-OnMyDevice/routearena/tree/main/relay">relay/</a> folder.</p>
+<p><strong>What is logged:</strong> claim id, pool key name, status, timestamps. <strong>Never:</strong> prompts, completions, request bodies, or your other providers' keys; your mirrored requests do not come here at all. Source for every endpoint is in the <a href="https://github.com/Works-OnMyDevice/routearena/tree/main/relay">relay/</a> folder.</p>
 <p class="m">Independent project, not affiliated with TokenRouter, OpenRouter, or any provider. TokenRouter is one of six comparison targets; credits are offered because TokenRouter is the only target that has them for this purpose. <a href="/llms.txt">llms.txt</a></p>
 </body></html>`);
 }

@@ -2,12 +2,15 @@ import { DurableObject } from "cloudflare:workers";
 
 /**
  * RelayState: one Durable Object instance ("global") holds every piece of relay state in SQLite.
- * A Durable Object runs single-threaded, so reserve/settle are atomic without locks or Lua.
+ * A Durable Object runs single-threaded, so pool pops and counters are atomic without locks.
  *
- * Money rules live here and nowhere else:
- *  - reserve(): refuses when spent + reserved + estimate > budget, or when the global commitment
- *    (relay spent + relay reserved + issued keys × per-claim budget) + estimate > cap.
- *  - settle(): releases the reservation and charges the actual cost (never more than the reservation).
+ * No money is tracked here. Spend is enforced by TokenRouter through the per-key quota set via its Management
+ * API; this object only knows which keys are still in the pool, which were issued, and to whom.
+ *
+ * Migration note: earlier deployments created a `reservations` table, `spent`/`reserved`/`requests` columns on
+ * `claims`, and `global:spent` / `global:reserved` counters for the retired metered-relay mode. They are left
+ * untouched (CREATE TABLE IF NOT EXISTS never alters an existing table) and are simply no longer read or written.
+ * Every statement below names its columns explicitly, so it runs identically against the old and new `claims` shape.
  */
 export interface ClaimRow {
   id: string;
@@ -17,10 +20,7 @@ export interface ClaimRow {
   verified_at: number | null;
   expires: number | null;
   budget: number;
-  spent: number;
-  reserved: number;
-  requests: number;
-  mode: "key" | "relay" | null;
+  mode: "key" | null;
   key_name: string | null;
 }
 
@@ -34,9 +34,9 @@ export class RelayState extends DurableObject {
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS claims (
         id TEXT PRIMARY KEY, email_hash TEXT, status TEXT, created INTEGER, verified_at INTEGER, expires INTEGER,
-        budget REAL, spent REAL DEFAULT 0, reserved REAL DEFAULT 0, requests INTEGER DEFAULT 0, mode TEXT, key_name TEXT
+        budget REAL, mode TEXT, key_name TEXT
       );
-      CREATE TABLE IF NOT EXISTS emails (hash TEXT PRIMARY KEY, created INTEGER);
+      CREATE TABLE IF NOT EXISTS emails (hash TEXT PRIMARY KEY, created INTEGER, sealed TEXT);
       CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT, exp INTEGER);
       CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value REAL);
       CREATE TABLE IF NOT EXISTS pool (seq INTEGER PRIMARY KEY AUTOINCREMENT, sealed TEXT);
@@ -45,8 +45,8 @@ export class RelayState extends DurableObject {
       CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, json TEXT, created INTEGER);
       CREATE TABLE IF NOT EXISTS keyclaim (hash TEXT PRIMARY KEY, claim_id TEXT);
       CREATE TABLE IF NOT EXISTS log (ts INTEGER, event TEXT, fields TEXT);
-      CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, claim_id TEXT, estimate REAL, created INTEGER);
     `);
+    // The oldest deployments created `emails` without `sealed`; adding it is the only change ever applied to an existing table.
     try {
       this.ctx.storage.sql.exec("ALTER TABLE emails ADD COLUMN sealed TEXT");
     } catch {
@@ -72,7 +72,7 @@ export class RelayState extends DurableObject {
     this.addCounter("global:claims", 1);
   }
   async getClaim(id: string): Promise<ClaimRow | null> {
-    const r = this.ctx.storage.sql.exec("SELECT * FROM claims WHERE id = ?", id).toArray()[0];
+    const r = this.ctx.storage.sql.exec("SELECT id, email_hash, status, created, verified_at, expires, budget, mode, key_name FROM claims WHERE id = ?", id).toArray()[0];
     return (r as unknown as ClaimRow) ?? null;
   }
   async emailClaimed(hash: string): Promise<boolean> {
@@ -90,46 +90,9 @@ export class RelayState extends DurableObject {
     const r = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM emails WHERE sealed IS NOT NULL").toArray()[0] as any;
     return Number(r?.n ?? 0);
   }
-  async markVerified(id: string, patch: { mode: "key" | "relay"; key_name?: string; expires: number }): Promise<void> {
+  async markVerified(id: string, patch: { mode: "key"; key_name?: string; expires: number }): Promise<void> {
     this.ctx.storage.sql.exec("UPDATE claims SET status = 'verified', verified_at = ?, expires = ?, mode = ?, key_name = ? WHERE id = ?", this.now(), patch.expires, patch.mode, patch.key_name ?? null, id);
     this.addCounter("global:verified", 1);
-  }
-
-  // ---------- money ----------
-  async committedUsd(perClaim: number): Promise<number> {
-    return this.counter("global:spent") + this.counter("global:reserved") + this.counter("pool:used") * perClaim;
-  }
-  /** Reserve `estimate` for a claim. Stale reservations (older than maxAgeSec) are charged first so a dead
-   *  isolate can never strand budget or let it leak. Returns a reservation id on success. */
-  async reserve(claimId: string, estimate: number, perClaim: number, cap: number, maxAgeSec = 600): Promise<{ status: "ok" | "budget" | "global"; id?: string }> {
-    await this.chargeStaleReservations(maxAgeSec);
-    const c = await this.getClaim(claimId);
-    if (!c) return { status: "budget" };
-    const budget = Math.min(Number(c.budget), perClaim);
-    if (Number(c.spent) + Number(c.reserved) + estimate > budget) return { status: "budget" };
-    if ((await this.committedUsd(perClaim)) + estimate > cap) return { status: "global" };
-    const id = crypto.randomUUID();
-    this.ctx.storage.sql.exec("INSERT INTO reservations (id, claim_id, estimate, created) VALUES (?, ?, ?, ?)", id, claimId, estimate, this.now());
-    this.ctx.storage.sql.exec("UPDATE claims SET reserved = reserved + ? WHERE id = ?", estimate, claimId);
-    this.addCounter("global:reserved", estimate);
-    return { status: "ok", id };
-  }
-  /** Settle a reservation: release it and charge `actual` (capped at the estimate). Idempotent per reservation id. */
-  async settle(reservationId: string, actual: number): Promise<number> {
-    const r = this.ctx.storage.sql.exec("SELECT claim_id, estimate FROM reservations WHERE id = ?", reservationId).toArray()[0];
-    if (!r) return this.counter("global:spent"); // already settled
-    const estimate = Number(r.estimate);
-    const charge = Math.min(Math.max(0, actual), estimate);
-    this.ctx.storage.sql.exec("DELETE FROM reservations WHERE id = ?", reservationId);
-    this.ctx.storage.sql.exec("UPDATE claims SET reserved = MAX(0, reserved - ?), spent = spent + ?, requests = requests + 1 WHERE id = ?", estimate, charge, r.claim_id);
-    this.addCounter("global:reserved", -estimate);
-    return this.addCounter("global:spent", charge);
-  }
-  /** Any reservation older than maxAgeSec is charged in full: the request is long over and its usage was never reported. */
-  async chargeStaleReservations(maxAgeSec: number): Promise<number> {
-    const stale = this.ctx.storage.sql.exec("SELECT id, estimate FROM reservations WHERE created < ?", this.now() - maxAgeSec).toArray();
-    for (const s of stale) await this.settle(String(s.id), Number(s.estimate));
-    return stale.length;
   }
 
   // ---------- pool ----------
@@ -137,6 +100,7 @@ export class RelayState extends DurableObject {
     for (const s of sealed) this.ctx.storage.sql.exec("INSERT INTO pool (sealed) VALUES (?)", s);
     return this.poolSize();
   }
+  /** Take the oldest key out of the pool and count it as issued. */
   async popPool(): Promise<string | null> {
     const r = this.ctx.storage.sql.exec("SELECT seq, sealed FROM pool ORDER BY seq LIMIT 1").toArray()[0];
     if (!r) return null;
@@ -144,12 +108,17 @@ export class RelayState extends DurableObject {
     this.addCounter("pool:used", 1);
     return String(r.sealed);
   }
+  /** Put a popped key back (hand-out aborted) and un-count it; it goes to the back of the queue. */
   async returnPool(sealed: string): Promise<void> {
     this.ctx.storage.sql.exec("INSERT INTO pool (sealed) VALUES (?)", sealed);
     this.addCounter("pool:used", -1);
   }
   async poolSize(): Promise<number> {
     return Number(this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM pool").toArray()[0].n);
+  }
+  /** Number of keys handed out so far (pops minus returns). */
+  async poolIssued(): Promise<number> {
+    return this.counter("pool:used");
   }
   async linkKey(hash: string, claimId: string): Promise<void> {
     this.ctx.storage.sql.exec("INSERT OR REPLACE INTO keyclaim (hash, claim_id) VALUES (?, ?)", hash, claimId);
@@ -217,18 +186,14 @@ export class RelayState extends DurableObject {
   }
 
   // ---------- housekeeping ----------
-  async stats(perClaim: number): Promise<Record<string, number>> {
+  async stats(): Promise<Record<string, number>> {
     const c = (n: string) => this.counter(n);
-    const tidy = (n: number) => Math.round(n * 1e9) / 1e9;
     return {
       claims: c("global:claims"),
       verified: c("global:verified"),
       published: c("global:published"),
-      relay_spent_usd: tidy(c("global:spent")),
-      relay_reserved_usd: tidy(c("global:reserved")),
       pool_available: await this.poolSize(),
-      pool_used: c("pool:used"),
-      committed_usd: tidy(await this.committedUsd(perClaim)),
+      pool_issued: c("pool:used"),
     };
   }
   async log(event: string, fields: Record<string, unknown>): Promise<void> {
@@ -239,7 +204,6 @@ export class RelayState extends DurableObject {
   }
   async sweep(): Promise<void> {
     const now = this.now();
-    await this.chargeStaleReservations(600);
     this.ctx.storage.sql.exec("DELETE FROM kv WHERE exp IS NOT NULL AND exp < ?", now);
     this.ctx.storage.sql.exec("DELETE FROM ratelimit WHERE exp < ?", now);
     this.ctx.storage.sql.exec("DELETE FROM reports WHERE created < ?", now - 180 * 86400);

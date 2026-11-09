@@ -2,21 +2,26 @@ import { env, logEvent } from "./env";
 import { sendMail } from "./mail";
 import { state } from "./store";
 import { openPoolItem, sealPoolItem, sha256, type PoolItem, sealText } from "./token";
+import { quotaApplied, setKeyQuota } from "./tokenrouterMgmt";
 import type { ClaimRow } from "../src/state";
 
 /**
- * Budget model. Two enforcement layers, each sufficient on its own:
+ * Credit model: key mode only.
  *
- * Key mode (preferred): the user gets a TokenRouter key that TokenRouter itself caps at PER_CLAIM_USD via the
- * Management API quota. Keys are capped when loaded into the pool (scripts/load-pool.mjs verifies the cap by
- * reading it back) and re-capped at hand-out. Nothing the relay does can raise that cap.
+ * A verified claimant receives a dedicated TokenRouter key that TokenRouter itself caps at PER_CLAIM_USD via the
+ * Management API quota. Keys are capped when loaded into the pool (scripts/load-pool.mjs reads the cap back) and
+ * re-capped at hand-out; a key is issued only after TokenRouter's own response confirms the cap. Mirrored requests
+ * go straight to TokenRouter; this relay never forwards, meters, estimates or prices anything.
  *
- * Relay mode (fallback): every request RESERVES a conservative cost estimate inside the Durable Object before it
- * is forwarded; the request is refused if spent + reserved + estimate would exceed the budget or the global cap.
- * After the response the reservation is settled against the real usage; if usage is missing or the stream is
- * cancelled, the full estimate is charged. The Durable Object is single-threaded, so concurrency cannot overshoot.
+ * When the pool is empty (or the issued-key ceiling is reached) new claims fail with a clear 503, and a claim that
+ * was already created stays pending so the same magic link succeeds once keys are added.
  */
 export type Claim = ClaimRow;
+
+export const EXHAUSTED = {
+  error: "Free credits are temporarily exhausted.",
+  fix: "Use --no-credits, or set TOKENROUTER_API_KEY with your own key.",
+} as const;
 
 export async function createClaim(id: string, email: string): Promise<void> {
   await state().createClaim(id, await sha256(normalizeEmail(email)), env.perClaimUsd);
@@ -25,8 +30,7 @@ export async function createClaim(id: string, email: string): Promise<void> {
 export async function getClaim(id: string): Promise<Claim | null> {
   const c = await state().getClaim(id);
   if (!c) return null;
-  const tidy = (n: unknown) => Math.round(Number(n ?? 0) * 1e9) / 1e9; // float noise from many settles must not read as a reservation
-  return { ...c, budget: Math.min(Number(c.budget), env.perClaimUsd), spent: tidy(c.spent), reserved: tidy(c.reserved), requests: Number(c.requests ?? 0) };
+  return { ...c, budget: Math.min(Number(c.budget), env.perClaimUsd) };
 }
 
 /** Normalize so aliases cannot multiply claims: lowercase, strip +tags, drop dots in gmail local parts. */
@@ -45,7 +49,7 @@ export async function emailAlreadyClaimed(email: string): Promise<boolean> {
 export async function markEmailClaimed(email: string): Promise<void> {
   await state().markEmailClaimed(await sha256(normalizeEmail(email)), await sealText("email", email.trim().toLowerCase()));
 }
-export async function markVerified(id: string, patch: { mode: "key" | "relay"; key_name?: string; expires: number }): Promise<void> {
+export async function markVerified(id: string, patch: { mode: "key"; key_name?: string; expires: number }): Promise<void> {
   await state().markVerified(id, patch);
 }
 
@@ -59,6 +63,9 @@ export async function returnPoolKey(item: PoolItem): Promise<void> {
 }
 export async function poolSize(): Promise<number> {
   return state().poolSize();
+}
+export async function poolIssued(): Promise<number> {
+  return state().poolIssued();
 }
 export async function pushPoolKeys(items: PoolItem[]): Promise<number> {
   if (!items.length) return poolSize();
@@ -74,47 +81,74 @@ export async function scheduleKeyExpiry(item: PoolItem, dueUnix: number): Promis
   await state().addExpiring(await sealPoolItem(item), dueUnix);
 }
 
-// ---------- global cap ----------
-export async function globalCommittedUsd(): Promise<number> {
-  return state().committedUsd(env.perClaimUsd);
-}
-/** True when handing out one more claim's budget would exceed GLOBAL_CAP_USD. */
+// ---------- capacity ----------
+/** True when the pool is empty or the issued-key ceiling (MAX_ISSUED_KEYS) has been reached. No fallback exists. */
 export async function capReachedForNewClaim(): Promise<boolean> {
-  return (await globalCommittedUsd()) + env.perClaimUsd > env.globalCapUsd;
+  const [available, issued] = await Promise.all([poolSize(), poolIssued()]);
+  return available <= 0 || issued >= env.maxIssuedKeys;
 }
 
-// ---------- relay-mode reservation ----------
-export async function reserve(claimId: string, estimate: number): Promise<{ status: "ok" | "budget" | "global"; id?: string }> {
-  return state().reserve(claimId, estimate, env.perClaimUsd, env.globalCapUsd, env.reservationMaxAgeSec);
-}
-export type StateStub = ReturnType<typeof state>;
-/** Settle through an explicitly captured stub: stream callbacks and timers run outside the request's async context. */
-export async function settleWith(stub: StateStub, reservationId: string, actual: number): Promise<number> {
-  const g = await stub.settle(reservationId, actual);
-  void maybeAlert(g, stub);
-  return g;
+export type HandOut = { ok: true; key: string; name: string } | { ok: false; reason: "exhausted" | "unverified" };
+
+/**
+ * Hand one pooled key to a claim. The key is re-capped at PER_CLAIM_USD through the Management API and issued only
+ * if TokenRouter's response confirms the cap; otherwise it goes back to the pool and nothing is issued.
+ * The claim is left untouched by this function so the caller can retry later.
+ */
+export async function handOutPoolKey(claimId: string, expUnix: number): Promise<HandOut> {
+  if (await capReachedForNewClaim()) {
+    logEvent("pool_exhausted", { id: claimId });
+    void alertPoolLow(await poolSize());
+    return { ok: false, reason: "exhausted" };
+  }
+  const pooled = await popPoolKey();
+  if (!pooled) {
+    logEvent("pool_exhausted", { id: claimId });
+    void alertPoolLow(0);
+    return { ok: false, reason: "exhausted" };
+  }
+  let applied = false;
+  try {
+    applied = quotaApplied(await setKeyQuota(pooled.key, env.perClaimUsd), env.perClaimUsd);
+    if (!applied) logEvent("quota_unverified", { id: claimId, key_name: pooled.name });
+  } catch (e) {
+    logEvent("quota_recap_failed", { id: claimId, key_name: pooled.name, err: String(e).slice(0, 160) });
+  }
+  if (!applied) {
+    await returnPoolKey(pooled); // never hand out a key whose cap TokenRouter did not confirm
+    return { ok: false, reason: "unverified" };
+  }
+  await linkKeyToClaim(pooled.key, claimId);
+  await scheduleKeyExpiry({ ...pooled, capped: true }, expUnix);
+  void alertPoolLow(await poolSize());
+  return { ok: true, key: pooled.key, name: pooled.name };
 }
 
-/** Pre-flight for relay mode that does not depend on money: status, expiry, kill switch. */
-export function blockedReason(c: Claim): string | null {
-  if (!env.relayEnabled) return "relay_disabled";
-  if (c.status !== "verified") return "not_verified";
-  if (c.expires && c.expires * 1000 < Date.now()) return "expired";
-  if (c.spent >= c.budget) return "budget_exhausted";
-  return null;
-}
+// ---------- owner alert ----------
+export const POOL_LOW_THRESHOLD = 3;
 
-async function maybeAlert(global: number, stub: StateStub = state()): Promise<void> {
-  for (const level of [150, 250]) {
-    if (global >= level && (await stub.kvSetNx(`alert:${level}`, "1"))) {
-      if (env.alertEmail) {
-        await sendMail(env.alertEmail, `RouteArena relay: global spend passed $${level}`, `<p>Global relay-mode spend is now $${global.toFixed(2)} of the $${env.globalCapUsd} cap.</p><p>Set RELAY_ENABLED=false or CLAIMS_ENABLED=false to stop.</p>`, `global-alert/${level}/${new Date().toISOString().slice(0, 10)}`).catch(() => undefined);
-      }
-      logEvent("alert", { level, global });
+/** Email the owner once per day when fewer than POOL_LOW_THRESHOLD keys remain. Never throws. */
+export async function alertPoolLow(available: number): Promise<boolean> {
+  if (available >= POOL_LOW_THRESHOLD) return false;
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    if (!(await state().kvSetNx(`alert:pool-low:${day}`, "1", 86400))) return false;
+    logEvent("alert_pool_low", { available });
+    if (env.alertEmail) {
+      await sendMail(
+        env.alertEmail,
+        `RouteArena relay: free-credit pool is ${available === 0 ? "empty" : "low"} (${available} left)`,
+        `<p>${available} capped TokenRouter key${available === 1 ? "" : "s"} remain in the pool.</p><p>Create more keys in the TokenRouter console and run <code>node relay/scripts/load-pool.mjs</code>. Until then new claims fail with "${EXHAUSTED.error}". Set CLAIMS_ENABLED=false to pause claims entirely.</p>`,
+        `pool-low/${day}`,
+      ).catch((e) => logEvent("alert_mail_failed", { err: String(e).slice(0, 120) }));
     }
+    return true;
+  } catch (e) {
+    logEvent("alert_failed", { err: String(e).slice(0, 120) });
+    return false;
   }
 }
 
 export async function stats(): Promise<Record<string, number>> {
-  return state().stats(env.perClaimUsd);
+  return state().stats();
 }

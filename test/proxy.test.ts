@@ -7,14 +7,14 @@ import { startProxy } from "../src/proxy/server.js";
 import type { ResolvedTarget, Target } from "../src/targets/index.js";
 import { startMockUpstream, tmpCwd, waitFor } from "./helpers.js";
 
-function mockTarget(id: string, baseUrl: string, models: Target["models"] = {}): ResolvedTarget {
-  const target: Target = { id, name: id, baseUrl, keyEnv: `${id.toUpperCase()}_API_KEY`, models };
+function mockTarget(id: string, baseUrl: string, extra: Partial<Target> = {}): ResolvedTarget {
+  const target: Target = { id, name: id, baseUrl, keyEnv: `${id.toUpperCase()}_API_KEY`, reportsCost: false, ...extra };
   return { target, status: "key", baseUrl, auth: `${id}-secret` };
 }
 
-const baseCfg = (port = 0): Config => ({ primary: "openrouter", sample: 1.0, port, hourlyCap: 500, maxInputTokens: 32_000, mirrorImages: false, createdAt: "" });
+const baseCfg = (port = 0, extra: Partial<Config> = {}): Config => ({ primary: "openrouter", sample: 1.0, port, hourlyCap: 500, maxInputTokens: 32_000, mirrorImages: false, createdAt: "", ...extra });
 
-test("forwards non-streaming requests unchanged, swaps auth, mirrors to a mapped target, logs both", async () => {
+test("forwards non-streaming requests unchanged, swaps auth, mirrors the same model id to the target, logs both", async () => {
   const primary = await startMockUpstream({ reply: () => ({ text: "hello world", usage: { prompt_tokens: 12, completion_tokens: 2, cost: 0.00042 } }) });
   const target = await startMockUpstream({ reply: () => ({ text: "hello world", usage: { prompt_tokens: 12, completion_tokens: 2 } }) });
   const cwd = tmpCwd();
@@ -25,7 +25,7 @@ test("forwards non-streaming requests unchanged, swaps auth, mirrors to a mapped
     primaryKey: "sk-or-v1-primary-secret",
     credits: null,
     cwd,
-    targets: [mockTarget("tgt", target.url, { "openai/gpt-4o-mini": { id: "gpt-4o-mini-on-tgt", input_per_m: 1, output_per_m: 2 } })],
+    targets: [mockTarget("tgt", target.url)],
   });
   try {
     const res = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
@@ -46,7 +46,7 @@ test("forwards non-streaming requests unchanged, swaps auth, mirrors to a mapped
     await proxy.engine.drain();
     await waitFor(() => target.seen.length === 1);
     assert.equal(target.seen[0].headers.authorization, "Bearer tgt-secret");
-    assert.equal(target.seen[0].body.model, "gpt-4o-mini-on-tgt");
+    assert.equal(target.seen[0].body.model, "openai/gpt-4o-mini", "no model_map: the target gets the id the client sent");
     assert.equal(target.seen[0].body.stream, true, "mirror streams for TTFT");
     assert.equal(target.seen[0].body.usage, undefined, "OpenRouter-only fields stripped");
 
@@ -56,18 +56,136 @@ test("forwards non-streaming requests unchanged, swaps auth, mirrors to a mapped
     const r = recs[0];
     assert.equal(r.mirrored, true);
     assert.equal(r.primary.status, "ok");
-    assert.equal(r.primary.cost_usd, 0.00042);
-    assert.equal(r.primary.cost_source, "measured");
+    assert.equal(r.primary.cost_usd, 0.00042, "primary cost is what OpenRouter reported");
+    assert.equal(r.primary.cost_source, "reported");
     assert.equal(r.targets.length, 1);
     assert.equal(r.targets[0].status, "ok");
-    assert.equal(r.targets[0].model, "gpt-4o-mini-on-tgt");
+    assert.equal(r.targets[0].model, "openai/gpt-4o-mini");
     assert.ok((r.targets[0].ttft_ms ?? 0) > 0);
-    // computed: 12 * 1/1e6 + 2 * 2/1e6
-    assert.ok(Math.abs((r.targets[0].cost_usd ?? 0) - (12e-6 + 4e-6)) < 1e-12);
-    assert.equal(r.targets[0].cost_source, "computed");
+    // The target returned tokens but no cost: RouteArena never prices tokens itself.
+    assert.strictEqual(r.targets[0].cost_usd, null);
+    assert.equal(r.targets[0].cost_source, "not_reported");
+    assert.equal(r.targets[0].target_request_id, undefined, "no requestIdHeader configured");
+    assert.ok(!("reported_cost_usd" in r.targets[0]));
     const rawLog = fs.readFileSync(logPath(cwd), "utf8");
     assert.ok(!rawLog.includes("secret"), "no key in log");
   } finally {
+    await proxy.close();
+    await primary.close();
+    await target.close();
+  }
+});
+
+test("model_map from config overrides the id sent to a target; other targets still get the client's id", async () => {
+  const primary = await startMockUpstream({ reply: () => ({ text: "ok" }) });
+  const mapped = await startMockUpstream({ reply: () => ({ text: "ok" }) });
+  const plain = await startMockUpstream({ reply: () => ({ text: "ok" }) });
+  const cwd = tmpCwd();
+  (PRIMARIES.openrouter as any).baseUrl = primary.url;
+  const proxy = await startProxy({
+    config: baseCfg(0, { model_map: { mapped: { "meta-llama/llama-3.3-70b-instruct": "llama-3.3-70b-versatile" } } }),
+    primaryKey: "k",
+    credits: null,
+    cwd,
+    targets: [mockTarget("mapped", mapped.url), mockTarget("plain", plain.url)],
+  });
+  try {
+    const send = (model: string) =>
+      fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }] }),
+      }).then((r) => r.text());
+    await send("meta-llama/llama-3.3-70b-instruct:nitro");
+    await send("qwen/qwen3-8b");
+    await proxy.engine.drain();
+    await waitFor(() => mapped.seen.length === 2 && plain.seen.length === 2);
+    assert.deepEqual(mapped.seen.map((s) => s.body.model).sort(), ["llama-3.3-70b-versatile", "qwen/qwen3-8b"], "override applies only where the map has an entry");
+    assert.deepEqual(plain.seen.map((s) => s.body.model).sort(), ["meta-llama/llama-3.3-70b-instruct", "qwen/qwen3-8b"], "unmapped target: client's id minus the OpenRouter variant suffix");
+    assert.deepEqual(primary.seen.map((s) => s.body.model).sort(), ["meta-llama/llama-3.3-70b-instruct:nitro", "qwen/qwen3-8b"], "primary request body untouched");
+    const recs = await readLog(logPath(cwd));
+    const llama = recs.find((r) => r.canonical_model === "meta-llama/llama-3.3-70b-instruct")!;
+    assert.equal(llama.targets.find((t) => t.provider === "mapped")!.model, "llama-3.3-70b-versatile", "log records the id actually sent");
+    assert.equal(llama.targets.find((t) => t.provider === "plain")!.model, "meta-llama/llama-3.3-70b-instruct");
+  } finally {
+    await proxy.close();
+    await primary.close();
+    await mapped.close();
+    await plain.close();
+  }
+});
+
+test("target_request_id is captured from the target's requestIdHeader; cost_source reported when the target sends usage.cost", async () => {
+  const primary = await startMockUpstream({ reply: () => ({ text: "ok", usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0.000001 } }) });
+  const withId = await startMockUpstream({ reply: () => ({ text: "ok", usage: { prompt_tokens: 1, completion_tokens: 1 }, headers: { "x-tokenrouter-request-id": "tr-req-42", "x-other": "ignored" } }) });
+  const reporting = await startMockUpstream({ reply: () => ({ text: "ok", usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0.0000077 }, headers: { "x-tokenrouter-request-id": "not-configured" } }) });
+  const cwd = tmpCwd();
+  (PRIMARIES.openrouter as any).baseUrl = primary.url;
+  const proxy = await startProxy({
+    config: baseCfg(),
+    primaryKey: "k",
+    credits: null,
+    cwd,
+    targets: [mockTarget("tokenrouter", withId.url, { requestIdHeader: "x-tokenrouter-request-id" }), mockTarget("router2", reporting.url, { reportsCost: true })],
+  });
+  try {
+    await (await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "x/y", messages: [{ role: "user", content: "hi" }] }),
+    })).text();
+    await proxy.engine.drain();
+    const [r] = await readLog(logPath(cwd));
+    const tr = r.targets.find((t) => t.provider === "tokenrouter")!;
+    assert.equal(tr.status, "ok");
+    assert.equal(tr.target_request_id, "tr-req-42");
+    assert.equal(tr.response_id, "chatcmpl-mock", "completion id still recorded alongside");
+    assert.strictEqual(tr.cost_usd, null);
+    assert.equal(tr.cost_source, "not_reported");
+    const r2 = r.targets.find((t) => t.provider === "router2")!;
+    assert.equal(r2.target_request_id, undefined, "header not captured unless the target declares it");
+    assert.equal(r2.cost_usd, 0.0000077);
+    assert.equal(r2.cost_source, "reported");
+  } finally {
+    await proxy.close();
+    await primary.close();
+    await withId.close();
+    await reporting.close();
+  }
+});
+
+test("OpenAI primary: usage without cost is not_reported (never computed), and the request is still mirrored", async () => {
+  // Plenty of tokens (and a cache hit) but no usage.cost: the only honest answer is "not reported".
+  const primary = await startMockUpstream({ reply: () => ({ text: "ok", usage: { prompt_tokens: 20_000, completion_tokens: 1_000, prompt_tokens_details: { cached_tokens: 10_000 } } }) });
+  const target = await startMockUpstream({ reply: () => ({ text: "ok" }) });
+  const cwd = tmpCwd();
+  const saved = PRIMARIES.openai.baseUrl;
+  (PRIMARIES.openai as any).baseUrl = primary.url;
+  const proxy = await startProxy({ config: baseCfg(0, { primary: "openai" }), primaryKey: "sk-openai", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
+  try {
+    for (const stream of [false, true]) {
+      await (await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o-mini", stream, messages: [{ role: "user", content: "hi" }] }),
+      })).text();
+    }
+    await proxy.engine.drain();
+    await waitFor(() => target.seen.length === 2);
+    const recs = await readLog(logPath(cwd));
+    assert.equal(recs.length, 2);
+    for (const r of recs) {
+      assert.equal(r.primary.provider, "openai");
+      assert.equal(r.primary.status, "ok");
+      assert.equal(r.primary.usage?.prompt_tokens, 20_000);
+      assert.strictEqual(r.primary.cost_usd, null, `stream=${r.primary.stream}: OpenAI reports no cost and RouteArena has no table`);
+      assert.equal(r.primary.cost_source, "not_reported");
+      assert.equal(r.canonical_model, "openai/gpt-4o-mini");
+      assert.equal(r.mirrored, true);
+      assert.equal(r.targets[0].model, "gpt-4o-mini", "the bare id the client sent goes to the target");
+    }
+  } finally {
+    (PRIMARIES.openai as any).baseUrl = saved;
     await proxy.close();
     await primary.close();
     await target.close();
@@ -94,13 +212,15 @@ test("streams primary bytes through untouched and records TTFT", async () => {
     const [r] = await readLog(logPath(cwd));
     assert.equal(r.primary.stream, true);
     assert.ok((r.primary.ttft_ms ?? 0) > 0);
-    // Both sides now measure ttft_ms on the first content chunk (was "first-stream-chunk" on the primary only).
+    // Both sides measure ttft_ms on the first content chunk.
     assert.equal(r.primary.ttft_method, "first-content-chunk");
     assert.equal(r.primary.ttft_ms, r.primary.ttft_first_content_ms);
     assert.ok((r.primary.ttft_first_byte_ms ?? Infinity) <= (r.primary.ttft_first_content_ms ?? 0));
     assert.equal(r.primary.response_id, "chatcmpl-mock");
     assert.equal(r.primary.empty_output, undefined);
     assert.equal(r.primary.completion_text, "one two three");
+    assert.equal(r.primary.cost_usd, 0.000001);
+    assert.equal(r.primary.cost_source, "reported");
     assert.equal(r.skip_reason, "no_targets");
   } finally {
     await proxy.close();
@@ -115,13 +235,7 @@ test("TTFT symmetry: first byte (SSE comment) precedes first content on both sid
   const target = await startMockUpstream({ reply: () => ({ ...reply(), id: "gen-target-1", usage: { prompt_tokens: 3, completion_tokens: 2 } }) });
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({
-    config: baseCfg(),
-    primaryKey: "k",
-    credits: null,
-    cwd,
-    targets: [mockTarget("tgt", target.url, { "x/y": { id: "y-on-tgt", input_per_m: 1, output_per_m: 1 } })],
-  });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   try {
     const res = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
@@ -161,13 +275,7 @@ test("empty output (finish_reason length, no content) is flagged on both sides a
   const target = await startMockUpstream({ reply });
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({
-    config: baseCfg(),
-    primaryKey: "k",
-    credits: null,
-    cwd,
-    targets: [mockTarget("tgt", target.url, { "x/y": { id: "y-on-tgt", input_per_m: 1, output_per_m: 1 } })],
-  });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   try {
     await (await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
@@ -198,7 +306,7 @@ test("a 200 stream carrying an error chunk and no content is status error on the
   const target = await startMockUpstream();
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url, { "x/y": { id: "y", input_per_m: 1, output_per_m: 1 } })] });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   try {
     const res = await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
@@ -228,7 +336,7 @@ test("mirror body: reasoning.effort and reasoning.max_tokens become reasoning_ef
   const target = await startMockUpstream({ reply: () => ({ text: "ok" }) });
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url, { "x/y": { id: "y", input_per_m: 1, output_per_m: 1 } })] });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   const send = (extra: Record<string, unknown>) =>
     fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
@@ -299,29 +407,30 @@ test("mirror default timeout equals the primary default; a timed-out mirror reco
   const cwd = tmpCwd();
   const { Logger } = await import("../src/proxy/logger.js");
   const engine = new MirrorEngine(
-    { primary: "openrouter", targets: [mockTarget("slow", slow.url, { "x/y": { id: "y", input_per_m: 1, output_per_m: 1 } })], sample: 1, hourlyCap: 10, maxInputTokens: 1000, mirrorImages: false, random: () => 0, timeoutMs: 50 },
+    { primary: "openrouter", targets: [mockTarget("slow", slow.url)], sample: 1, hourlyCap: 10, maxInputTokens: 1000, mirrorImages: false, random: () => 0, timeoutMs: 50 },
     new Logger(cwd),
   );
   try {
-    engine.handle("x/y", { messages: [{ role: "user", content: "hi" }] }, { provider: "openrouter", model: "x/y", status: "ok" }, true);
+    engine.handle("x/y", { model: "x/y", messages: [{ role: "user", content: "hi" }] }, { provider: "openrouter", model: "x/y", status: "ok" }, true);
     await engine.drain(5000);
     const [r] = await readLog(logPath(cwd));
     const t = r.targets[0];
     assert.equal(t.status, "error");
     assert.equal(t.error_type, "timeout");
     assert.ok(typeof t.latency_ms === "number" && t.latency_ms >= 40, `latency recorded on timeout: ${t.latency_ms}`);
-    assert.equal(t.cost_source, "unknown");
+    assert.strictEqual(t.cost_usd, null);
+    assert.equal(t.cost_source, "not_reported");
   } finally {
     await slow.close();
   }
 });
 
-test("a target 200 without usage is unpriced: cost_usd null, cost_source unknown", async () => {
+test("a target 200 without usage is unpriced: cost_usd null, cost_source not_reported", async () => {
   const primary = await startMockUpstream({ reply: () => ({ text: "ok", usage: { prompt_tokens: 1, completion_tokens: 1, cost: 0.000001 } }) });
   const target = await startMockUpstream({ reply: () => ({ text: "ok", usage: null }) });
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url, { "x/y": { id: "y", input_per_m: 1, output_per_m: 1 } })] });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   try {
     await (await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
@@ -332,9 +441,9 @@ test("a target 200 without usage is unpriced: cost_usd null, cost_source unknown
     const [r] = await readLog(logPath(cwd));
     assert.equal(r.targets[0].status, "ok");
     assert.equal(r.targets[0].usage, null);
-    assert.equal(r.targets[0].cost_source, "unknown");
+    assert.equal(r.targets[0].cost_source, "not_reported");
     assert.strictEqual(r.targets[0].cost_usd, null);
-    assert.equal(r.primary.cost_source, "measured");
+    assert.equal(r.primary.cost_source, "reported");
   } finally {
     await proxy.close();
     await primary.close();
@@ -342,23 +451,30 @@ test("a target 200 without usage is unpriced: cost_usd null, cost_source unknown
   }
 });
 
-test("unmapped models are logged as unmapped, not sent", async () => {
+test("every model is sent; a target that rejects it is status error / model_not_found, never skipped", async () => {
   const primary = await startMockUpstream();
-  const target = await startMockUpstream();
+  const target = await startMockUpstream({ reply: () => ({ status: 404 }) });
   const cwd = tmpCwd();
   (PRIMARIES.openrouter as any).baseUrl = primary.url;
-  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url, {})] });
+  const proxy = await startProxy({ config: baseCfg(), primaryKey: "k", credits: null, cwd, targets: [mockTarget("tgt", target.url)] });
   try {
-    await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+    await (await fetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "vendor/rare-model:free", messages: [{ role: "user", content: "hi" }] }),
-    });
+    })).text();
     await proxy.engine.drain();
+    await waitFor(() => target.seen.length === 1);
+    assert.equal(target.seen[0].body.model, "vendor/rare-model", "sent as the client spelled it, minus the variant suffix");
     const [r] = await readLog(logPath(cwd));
     assert.equal(r.canonical_model, "vendor/rare-model");
-    assert.equal(r.targets[0].status, "unmapped");
-    assert.equal(target.seen.length, 0);
+    assert.equal(r.mirrored, true);
+    assert.equal(r.targets[0].status, "error");
+    assert.equal(r.targets[0].error_type, "model_not_found");
+    assert.equal(r.targets[0].http_status, 404);
+    assert.equal(r.targets[0].cost_source, "not_reported");
+    assert.deepEqual(Object.keys(proxy.engine.stats).sort(), ["mirrored", "requests", "skipped", "target_error", "target_ok"], "no unmapped counter");
+    assert.equal(proxy.engine.stats.target_error, 1);
   } finally {
     await proxy.close();
     await primary.close();
